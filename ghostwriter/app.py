@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -58,6 +59,8 @@ class GhostWriterApp:
         self.worker: threading.Thread | None = None
         self.events: queue.Queue = queue.Queue()
         self.runlog = RunLog()
+        self._on_plan_done = None
+        self._pending_backend = None
 
         c = self.config
         self.pace = tk.StringVar(value=c["pace"] if c["pace"] in PACES else "Natural")
@@ -372,7 +375,15 @@ class GhostWriterApp:
         except (OSError, ValueError) as exc:
             messagebox.showinfo("GhostWriter", f"The logs are in:\n{path}\n\n({exc})")
 
-    def _build_session(self) -> Session | None:
+    def _busy(self) -> bool:
+        return self.runner is not None or (self.worker is not None and self.worker.is_alive())
+
+    def _build_session_unplanned(self) -> Session | None:
+        """Validate the inputs and build the Session, but do NOT plan yet.
+
+        Planning can be heavy (hundreds of files), so it is left to run on a
+        background thread; this does only the cheap, UI-thread-safe checks.
+        """
         self._store_current()
         c = self.config
         project = self.mode.get() == "project"
@@ -408,72 +419,111 @@ class GhostWriterApp:
             verify=self.opt_verify.get(), repair=bool(c["repair_by_paste"]), save=bool(c["save_files"]),
             countdown=int(c["countdown_seconds"]), plan=plan,
         )
-        session = Session(jobs, options, log=self._write_log)
-        try:
-            self.problems = session.prepare()
-        except Exception as exc:   # planning must never take the window down
-            messagebox.showerror("GhostWriter", f"Could not plan the typing session:\n{exc}")
-            return None
-        for message in self.problems:
-            self._write_log("! " + message)
-        if not any(j.plan for j in jobs):
-            messagebox.showwarning("GhostWriter", "Nothing to type:\n\n" + "\n".join(self.problems))
-            return None
-        return session
+        # The log goes through the event queue so it is safe from any thread.
+        return Session(jobs, options, log=lambda text: self.events.put(("log", text)))
+
+    def _plan_in_background(self, session: Session, done_event: str, on_done):
+        """Run session.prepare() on a worker thread with progress."""
+        def report(done, total):
+            self.events.put(("plan_progress", done, total))
+            if done % 5 == 0:
+                time.sleep(0.003)       # planning is CPU-bound; yield so the window stays smooth
+
+        def work():
+            try:
+                problems = session.prepare(progress=report)
+                for message in problems:
+                    self.events.put(("log", "! " + message))
+                self.events.put((done_event, session, problems))
+            except Exception as exc:        # planning must never take the window down
+                self.events.put(("error", f"Could not plan the typing session:\n{exc}"))
+                self.events.put((done_event, None, []))
+
+        self.status.set("Planning…")
+        self.progress.configure(mode="determinate", maximum=1, value=0)
+        self.start_btn.configure(state="disabled")
+        self.preview_btn.configure(state="disabled")
+        self._on_plan_done = on_done
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
 
     def preview(self):
-        session = self._build_session()
-        if not session:
+        if self._busy():
             return
+        session = self._build_session_unplanned()
+        if session is None:
+            return
+        self._plan_in_background(session, "preview_done", self._preview_ready)
+
+    def _preview_ready(self, session, problems):
+        self.start_btn.configure(state="normal")
+        self.preview_btn.configure(state="normal")
+        if session is None:
+            self.status.set("Planning failed")
+            return
+        planned = 0
         for job in session.jobs:
             if job.plan:
+                planned += 1
                 stats = ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in job.plan.stats.items() if v)
                 self._write_log(f"    plan for {job.name}: {stats or 'straight typing'}")
-        self.status.set("Plan ready")
+        self.status.set(f"Plan ready ({planned} file{'s' if planned != 1 else ''})")
 
     def start(self):
+        if self._busy():
+            return
         try:
             backend = create_backend(self.config["input_backend"])
         except ImportError:
             return messagebox.showerror(
                 "Missing packages",
                 "Open PowerShell in the GhostWriter folder and run:\n\npy -m pip install -r requirements.txt")
-        session = self._build_session()
-        if not session:
+        session = self._build_session_unplanned()
+        if session is None:
             return
-        project = session.o.project_dir is not None
+        self._pending_backend = backend
+        self._plan_in_background(session, "start_done", self._start_ready)
+
+    def _start_ready(self, session, problems):
+        if session is None:
+            self.start_btn.configure(state="normal")
+            self.preview_btn.configure(state="normal")
+            self.status.set("Planning failed")
+            return
         todo = [j.name for j in session.jobs if j.plan]
-        if project:
-            question = (f"GhostWriter will create {len(todo)} file(s) in\n{session.o.project_dir}\n"
-                        "and type them in the VS Code window you focus during the countdown.\n\n"
+        if not todo:
+            self.start_btn.configure(state="normal")
+            self.preview_btn.configure(state="normal")
+            self.status.set("Nothing to type")
+            messagebox.showwarning("GhostWriter", "Nothing to type:\n\n" + "\n".join(problems[:10]))
+            return
+        if session.o.project_dir is not None:
+            question = (f"GhostWriter will create/type {len(todo)} file(s) in\n{session.o.project_dir}\n"
+                        "in the VS Code window you focus during the countdown.\n\n"
                         "That window must have this folder open. Continue?")
         else:
             question = ("GhostWriter will type into whichever window has focus after the countdown.\n\n"
                         "Click into an empty VS Code editor tab during the countdown. Continue?")
-        if self.problems:
-            question += "\n\nNotes:\n• " + "\n• ".join(self.problems[:6])
+        if problems:
+            question += "\n\nNotes:\n• " + "\n• ".join(problems[:6])
         if not messagebox.askyesno("Ready to type?", question):
+            self.start_btn.configure(state="normal")
+            self.preview_btn.configure(state="normal")
+            self.status.set("Ready")
             return
-        try:
-            session.prepare_project()
-        except (OSError, ValueError) as exc:
-            return messagebox.showerror("GhostWriter", f"Could not prepare the project folder:\n{exc}")
 
         c = self.config
         timing = Timing(pace=self.pace.get(), think_min=c["thinking_pause_min_s"],
                         think_max=c["thinking_pause_max_s"], line_min=c["line_pause_min_s"],
                         line_max=c["line_pause_max_s"])
-        self.runner = Runner(backend, timing,
+        self.runner = Runner(self._pending_backend, timing,
                              on_status=lambda text: self.events.put(("status", text)),
                              on_progress=lambda done, total: self.events.put(("progress", done, total)),
                              mouse=self.opt_mouse.get())
-        session.log = lambda text: self.events.put(("log", text))
         destination = str(session.o.project_dir) if session.o.project_dir else "focused editor"
         path = self.runlog.start(f"{len(todo)} file(s) -> {destination}")
         if path:
             self._write_log(f"Logging this run to {path}")
-        self.start_btn.configure(state="disabled")
-        self.preview_btn.configure(state="disabled")
         self.pause_btn.configure(state="normal", text="Ⅱ Pause")
         self.stop_btn.configure(state="normal")
         self.hotkeys.start({c["hotkey_pause"]: lambda: self.events.put(("tray", "toggle")),
@@ -507,8 +557,12 @@ class GhostWriterApp:
 
     def _run(self, session: Session):
         try:
+            session.prepare_project()        # create the files / write workspace settings
             session.run(self.runner)
             final = "Finished"
+        except (OSError, ValueError) as exc:
+            self.events.put(("error", f"Could not prepare the project folder:\n{exc}"))
+            final = "Error"
         except Stopped:
             final = "Stopped"
         except EmergencyStop:
@@ -539,6 +593,16 @@ class GhostWriterApp:
                         self._show_window()
                 elif kind == "progress":
                     self.progress.configure(maximum=max(1, event[2]), value=event[1])
+                elif kind == "plan_progress":
+                    done, total = event[1], event[2]
+                    self.progress.configure(maximum=max(1, total), value=done)
+                    if total > 12:
+                        self.status.set(f"Planning {done}/{total}…")
+                        self.tray.update(status=f"Planning {done}/{total}…")
+                elif kind in ("preview_done", "start_done"):
+                    callback, self._on_plan_done = self._on_plan_done, None
+                    if callback:
+                        callback(event[1], event[2])
                 elif kind == "log":
                     self._write_log(event[1])
                 elif kind == "error":

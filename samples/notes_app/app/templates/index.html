@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="layout">
+    <aside class="sidebar">
+        <h2>Tags</h2>
+        <ul class="tags">
+            {% for tag in tags %}
+            <li class="{{ 'popular' if tag.is_popular else '' }}">
+                <a href="{{ url_for('notes.index', tag=tag.name) }}">
+                    {{ tag.name }} <span class="count">{{ tag.count }}</span>
+                </a>
+            </li>
+            {% else %}
+            <li class="muted">No tags yet</li>
+            {% endfor %}
+        </ul>
+    </aside>
+
+    <section class="notes" id="note-list">
+        {% if active_tag %}
+        <p class="filter">Filtered by <strong>{{ active_tag }}</strong> —
+            <a href="{{ url_for('notes.index') }}">clear</a></p>
+        {% endif %}
+        {% for note in notes %}
+        <article class="card {{ 'pinned' if note.pinned else '' }}" data-id="{{ note.id }}">
+            <h3><a href="{{ url_for('notes.view', note_id=note.id) }}">{{ note.title }}</a></h3>
+            <p class="excerpt">{{ note.excerpt }}</p>
+            <div class="meta">
+                {% for tag in note.tags %}<span class="pill">{{ tag }}</span>{% endfor %}
+                <form method="post" action="{{ url_for('notes.pin', note_id=note.id) }}">
+                    <button class="link">{{ 'Unpin' if note.pinned else 'Pin' }}</button>
+                </form>
+            </div>
+        </article>
+        {% else %}
+        <p class="empty">Nothing here yet. <a href="{{ url_for('notes.new') }}">Write one.</a></p>
+        {% endfor %}
+    </section>
+</div>
+{% endblock %}

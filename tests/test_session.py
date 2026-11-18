@@ -73,6 +73,41 @@ class ProjectSession(unittest.TestCase):
         session, fake, _, _ = self.run_session(jobs, options, existing={"a.py": "print('keep me')\n"})
         self.assertEqual(fake.editors["a.py"].text(), "x = 1")
 
+    def test_prepare_reports_progress_and_survives_many_files(self):
+        jobs = [Job(f"pkg/mod{i}.py", f"x = {i}\n\n\ndef f():\n    return {i}\n") for i in range(60)]
+        options = SessionOptions(project_dir=self.project, countdown=0, plan=PlanOptions(seed=1))
+        session = Session(jobs, options, log=lambda s: None, user_settings={})
+        seen = []
+        messages = session.prepare(progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual(len(seen), 60)                 # one progress call per file
+        self.assertEqual(seen[-1], (60, 60))
+        self.assertEqual(sum(1 for j in jobs if j.plan), 60)
+        self.assertEqual(messages, [])
+
+    def test_one_unplannable_file_does_not_abort_the_batch(self):
+        jobs = [Job("a.py", "x = 1"), Job("b.py", "y = 2"), Job("c.py", "z = 3")]
+        options = SessionOptions(project_dir=self.project, countdown=0, plan=PlanOptions(seed=1))
+        session = Session(jobs, options, log=lambda s: None, user_settings={})
+        # Make the middle file blow up inside the planner.
+        import ghostwriter.session as sessmod
+        real = sessmod.Planner
+
+        class Exploding(real):
+            def build(self):
+                if "y = 2" in self.target:
+                    raise RuntimeError("boom")
+                return super().build()
+
+        sessmod.Planner = Exploding
+        try:
+            messages = session.prepare()
+        finally:
+            sessmod.Planner = real
+        self.assertIsNone(jobs[1].plan)
+        self.assertIsNotNone(jobs[0].plan)
+        self.assertIsNotNone(jobs[2].plan)
+        self.assertTrue(any("b.py" in m and "boom" in m for m in messages))
+
     def test_paths_cannot_escape_the_project(self):
         session = Session([Job("../evil.py", "x = 1")], SessionOptions(project_dir=self.project, countdown=0),
                           user_settings={})
