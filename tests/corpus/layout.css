@@ -1,0 +1,36 @@
+@import "reset.css";
+
+* { box-sizing: border-box; }
+
+html,
+body {
+  height: 100%;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  grid-template-areas:
+    "header header"
+    "main sidebar";
+}
+
+a[href^="http"]:not(.plain)::after {
+  content: "\2197";
+}
+
+/* multi-line
+   comment */
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% {
+    opacity: 0.4;
+  }
+  100% { opacity: 1; }
+}
+
+@supports (display: grid) {
+  @media screen and (min-width: 40em) {
+    .grid { gap: 1em; }
+  }
+}

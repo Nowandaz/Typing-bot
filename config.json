@@ -1,0 +1,24 @@
+{
+  "pace": "Natural",
+  "countdown_seconds": 5,
+  "line_pause_min_s": 0.18,
+  "line_pause_max_s": 0.65,
+  "thinking_pause_min_s": 1.0,
+  "thinking_pause_max_s": 3.5,
+
+  "typo_probability": 0.035,
+  "rewrite_probability": 0.10,
+  "revisit_probability": 0.45,
+  "review_probability": 0.25,
+  "allow_demo_corrections": true,
+  "allow_navigation": true,
+
+  "dismiss_suggestions": true,
+  "verify_after_typing": true,
+  "repair_by_paste": true,
+  "save_files": true,
+  "apply_recommended_settings": true,
+
+  "input_backend": "auto",
+  "seed": null
+}

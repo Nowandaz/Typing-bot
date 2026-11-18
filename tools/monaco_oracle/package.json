@@ -1,0 +1,10 @@
+{
+  "name": "ghostwriter-monaco-oracle",
+  "private": true,
+  "description": "Replays GhostWriter keystroke plans in Monaco (the VS Code editor core) and checks the model's predictions.",
+  "type": "module",
+  "dependencies": {
+    "monaco-editor": "0.57.0",
+    "playwright": "^1.48.0"
+  }
+}
