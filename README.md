@@ -12,7 +12,7 @@ instead of against it.
 | Bracket awareness | Lets VS Code auto-close `()`, `[]`, `{}`, quotes and `/** */`, types over the closers, presses Enter between a pair to open a block and later steps past the closing bracket with ↓ / End. |
 | Cursor navigation | Moves with arrows, Home/End, Ctrl+End and Go to Line (Ctrl+G) between lines and code blocks. |
 | Editing | Selects text with Shift+arrows or Home / Shift+End, deletes it and rewrites it. |
-| Corrections | Typos fixed with Backspace, and "first draft" slips (a wrong name, value or comparison) that are selected and retyped. Every correction is reversible: the final file is always the source file. |
+| Corrections | Finger slips (neighbouring key, swapped, doubled or skipped letter) fixed with Backspace, and code slips that still read as reasonable code (see below) that are selected and retyped. Every correction is reversible: the final file is always the source file. |
 | Multi-file workflow | Creates the files of a project, opens each one with Quick Open (Ctrl+P), types it, checks it and saves it. |
 | Code awareness | Recognises functions, classes, loops and conditions; uses them for pacing, status messages, and for jumping back to review a finished block or add a comment/import that was "forgotten". |
 
@@ -89,6 +89,26 @@ source file ──► Planner ──► actions (type / key / go-to-line / pause
 * **Verification.** After typing, GhostWriter selects all, copies, and
   compares the editor with the source. If they differ it says where, and (by
   default) corrects the buffer with a single paste. This uses the clipboard.
+
+### How mistakes are chosen
+
+Mistakes are meant to look like the ones people make, not like noise.
+
+* **Finger slips** happen inside words of four letters or more, never on the
+  first letter, more often in long words, and never close together. They are
+  noticed immediately, a letter or two later, or at the end of the word.
+* **Code slips** replace one token with something that is still valid-looking
+  code: a name that already exists and is easily confused with the right one
+  (`item`/`items`, `self.width`/`self.height` when both were used together,
+  names sharing a prefix), a first idea for a new name that is then renamed,
+  an off-by-one in a comparison bound, `range()` or index, or `<` for `<=`.
+  A comparison is never flipped to its opposite, and literal data is left
+  alone. Slips are at least five lines apart and are fixed at the end of the
+  line by selecting the token and retyping it.
+* A stand-alone comment or import may be left out and added a few lines later
+  (an import: when its name is first used).
+
+All of it is driven by the `seed`, so a performance can be repeated exactly.
 
 ### Recommended VS Code settings
 
