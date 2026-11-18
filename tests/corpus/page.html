@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cart &amp; checkout</title>
+  <style>
+    .cart { display: grid; gap: 8px; }
+    .cart > li:hover {
+      background: #eee;
+    }
+  </style>
+</head>
+<body class="page">
+  <header>
+    <nav>
+      <a href="/">Home</a> |
+      <a href="/cart" class="active">Cart</a>
+    </nav>
+  </header>
+  <!--
+    Multi-line comment
+  -->
+  <table>
+    <tr><th>Item</th><th>Price</th></tr>
+    <tr>
+      <td>Tea</td>
+      <td>2.50</td>
+    </tr>
+  </table>
+  <img src="logo.png" alt="Logo">
+  <br>
+  <button onclick="checkout({ fast: true })" disabled>Pay</button>
+  <script>
+    function checkout(options) {
+      if (options.fast) {
+        console.log("fast checkout");
+      }
+      return [1, 2, 3].map((n) => n * 2);
+    }
+  </script>
+</body>
+</html>

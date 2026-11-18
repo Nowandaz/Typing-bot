@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>To-do</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        body {
+            margin: 0;
+        }
+    </style>
+</head>
+<body>
+    <!-- Main application shell -->
+    <main class="app">
+        <h1>What's next?</h1>
+        <form id="new-todo">
+            <input type="text" name="title" placeholder="Add a task" required>
+            <button type="submit">Add</button>
+        </form>
+        <ul id="list">
+            <li class="done">Write the demo</li>
+            <li><a href="#more">Show more</a></li>
+        </ul>
+        <p>
+            Tasks are saved in your browser.
+        </p>
+    </main>
+    <script src="todo.js" type="module"></script>
+    <script>
+        const form = document.getElementById('new-todo');
+        form.addEventListener('submit', (event) => {
+            event.preventDefault();
+        });
+    </script>
+</body>
+</html>

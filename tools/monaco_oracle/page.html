@@ -1,0 +1,98 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="/monaco/min/vs/editor/editor.main.css">
+<style>html,body{margin:0;height:100%}#ed{width:1000px;height:700px}</style>
+</head>
+<body>
+<div id="ed"></div>
+<script src="/monaco/min/vs/loader.js"></script>
+<script>
+const AUTO_INDENT = ['none', 'keep', 'brackets', 'advanced', 'full'];
+function rx(spec) {
+  if (spec == null) return undefined;
+  if (typeof spec === 'string') return new RegExp(spec);
+  return new RegExp(spec.pattern, spec.flags || '');
+}
+const INDENT = { none: 0, indent: 1, indentOutdent: 2, outdent: 3 };
+function toMonacoConfig(cfg) {
+  const out = { comments: cfg.comments, brackets: cfg.brackets, autoClosingPairs: cfg.autoClosingPairs };
+  if (cfg.autoCloseBefore) out.autoCloseBefore = cfg.autoCloseBefore;
+  out.onEnterRules = (cfg.onEnterRules || []).map(r => ({
+    beforeText: rx(r.beforeText), afterText: rx(r.afterText), previousLineText: rx(r.previousLineText),
+    action: { indentAction: INDENT[r.action.indent], appendText: r.action.appendText, removeText: r.action.removeText },
+  }));
+  if (cfg.indentationRules) {
+    const ir = cfg.indentationRules;
+    out.indentationRules = {
+      increaseIndentPattern: rx(ir.increaseIndentPattern), decreaseIndentPattern: rx(ir.decreaseIndentPattern),
+      indentNextLinePattern: rx(ir.indentNextLinePattern), unIndentedLinePattern: rx(ir.unIndentedLinePattern),
+    };
+  }
+  return out;
+}
+window.ready = new Promise(resolve => {
+  require.config({ paths: { vs: '/monaco/min/vs' } });
+  require(['vs/editor/editor.main'], async () => {
+    const configs = await (await fetch('/configs.json')).json();
+    const editor = monaco.editor.create(document.getElementById('ed'), {
+      value: '', language: 'plaintext', automaticLayout: false,
+      quickSuggestions: false, suggestOnTriggerCharacters: false, wordBasedSuggestions: 'off',
+      parameterHints: { enabled: false }, acceptSuggestionOnEnter: 'off', tabCompletion: 'off',
+      inlineSuggest: { enabled: false }, formatOnType: false, minimap: { enabled: false },
+      autoClosingBrackets: 'languageDefined', detectIndentation: false, linkedEditing: false,
+    });
+    window.editor = editor;
+    const primed = new Set();
+    // Load each language (so Monaco's own lazy configuration lands first),
+    // then register VS Code's real configuration on top of it.
+    window.prime = async (lang) => {
+      if (primed.has(lang) || lang === 'plaintext') return;
+      const m = monaco.editor.createModel('x', lang);
+      editor.setModel(m);
+      await new Promise(r => setTimeout(r, 700));
+      for (const id of (lang === 'html' ? ['html', 'javascript', 'css'] : [lang])) {
+        if (configs[id]) monaco.languages.setLanguageConfiguration(id, toMonacoConfig(configs[id]));
+      }
+      primed.add(lang);
+      if (lang === 'html') { primed.add('javascript'); primed.add('css'); }
+      m.dispose();
+    };
+    window.begin = async (lang, s) => {
+      await window.prime(lang);
+      // Re-register every time so VS Code's configuration always wins over
+      // anything Monaco loaded lazily in the meantime.
+      for (const id of (lang === 'html' ? ['html', 'javascript', 'css'] : [lang])) {
+        if (configs[id]) monaco.languages.setLanguageConfiguration(id, toMonacoConfig(configs[id]));
+      }
+      const old = editor.getModel();
+      // Editor options first: the cursor reads them when a model is attached.
+      editor.updateOptions({
+        autoIndent: s.auto_indent, autoClosingBrackets: s.auto_closing_brackets,
+        autoClosingQuotes: s.auto_closing_quotes, autoClosingComments: s.auto_closing_comments,
+        autoClosingOvertype: s.auto_closing_overtype, autoClosingDelete: s.auto_closing_delete,
+        useTabStops: s.use_tab_stops,
+      });
+      const m = monaco.editor.createModel('', lang);
+      editor.setModel(m);
+      if (old) old.dispose();
+      m.updateOptions({ tabSize: s.tab_size, indentSize: s.tab_size, insertSpaces: s.insert_spaces,
+                        trimAutoWhitespace: s.trim_auto_whitespace });
+      m.tokenization.forceTokenization(1);
+      editor.focus();
+    };
+    window.state = () => {
+      const p = editor.getPosition();
+      // Tokenisation normally catches up between human-speed keystrokes.
+      const m = editor.getModel();
+      m.tokenization.forceTokenization(m.getLineCount());
+      return { text: editor.getValue(), row: p.lineNumber - 1, col: p.column - 1 };
+    };
+    window.paste = (text) => editor.trigger('keyboard', 'paste', { text });
+    resolve();
+  });
+});
+</script>
+</body>
+</html>
