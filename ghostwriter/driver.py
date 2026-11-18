@@ -22,7 +22,7 @@ import threading
 import time
 
 from .actions import GotoLine, Key, Note, Paste, Pause, Plan, Type
-from .motion import PACES, Rhythm, mouse_path  # noqa: F401  (PACES re-exported for the UI)
+from .motion import PACES, Rhythm, hover_path, mouse_path  # noqa: F401  (PACES re-exported for the UI)
 
 
 class EmergencyStop(Exception):
@@ -440,12 +440,12 @@ class Runner:
                 self.on_progress(done, total)
 
     # -- pointer
-    def _glide(self, x: float, y: float) -> bool:
-        """Move the pointer along a hand-like path.  Gives up (returns False)
-        as soon as the person moves the mouse themselves."""
+    def _follow_path(self, points) -> bool:
+        """Drive the pointer through a path.  Gives up (returns False) the
+        moment the person moves the mouse themselves."""
         backend = self.backend
         last = backend.mouse_pos()
-        for px, py, dt in mouse_path(last, (x, y), self.timing.rng):
+        for px, py, dt in points:
             self.wait(dt)
             now = backend.mouse_pos()
             if math.hypot(now[0] - last[0], now[1] - last[1]) > 6:
@@ -454,17 +454,39 @@ class Runner:
             last = (px, py)
         return True
 
-    def _pointer_gesture(self, kind: str) -> float:
-        """Occasionally nudge the mouse, or scroll back while reviewing.
+    def _glide(self, x: float, y: float) -> bool:
+        """Move the pointer to (x, y) along a hand-like curved path."""
+        return self._follow_path(mouse_path(self.backend.mouse_pos(), (x, y), self.timing.rng))
 
-        Only moves and wheel scrolling are used - never a click, which would
-        move the text cursor.  Returns the seconds it took.
+    def _hover(self, center) -> bool:
+        """Small idle movements, as if a hand is resting on the mouse."""
+        return self._follow_path(hover_path(center, self.timing.rng))
+
+    # How often a pause produces any pointer movement, and which gestures it
+    # draws from.  Movement clusters around thinking and reviewing; during a
+    # run of keystrokes the pointer stays put, which is what a person does.
+    GESTURE_CHANCE = {"review": 0.85, "think": 0.5, "plan": 0.3, "notice": 0.12, "line": 0.05}
+    GESTURE_MIX = {
+        "review": {"read": 70, "follow": 20, "hover": 10},
+        "think": {"hover": 35, "drift": 25, "read": 15, "aside": 15, "follow": 10},
+        "plan": {"drift": 40, "aside": 30, "hover": 20, "follow": 10},
+        "notice": {"nudge": 65, "hover": 35},
+        "line": {"nudge": 100},
+    }
+
+    def _pointer_gesture(self, kind: str) -> float:
+        """Make one occasional, purposeful pointer movement during a pause.
+
+        A person rests a hand on the mouse, drifts it, follows the code, moves
+        it aside to type, or scrolls back to re-read.  Only moves and the
+        wheel are used - never a click, which would move the text caret.
+        Returns the real seconds spent, so the gesture fits inside the pause
+        rather than lengthening the run.
         """
         backend, rng = self.backend, self.timing.rng
         if not hasattr(backend, "mouse_move"):
             return 0.0
-        chance = {"review": 0.7, "think": 0.2, "plan": 0.05}.get(kind, 0.0)
-        if rng.random() >= chance:
+        if rng.random() >= self.GESTURE_CHANCE.get(kind, 0.0):
             return 0.0
         rect = backend.window_rect(self.focus_target) if self.focus_target else backend.window_rect()
         if not rect:
@@ -475,26 +497,40 @@ class Runner:
             return 0.0
         started = time.monotonic()
         x0, y0 = backend.mouse_pos()
-        lo_x, hi_x = left + 0.40 * width, right - 0.10 * width      # the editor area, away from side bars
+        lo_x, hi_x = left + 0.40 * width, right - 0.10 * width    # editor text column, clear of the side bars
         lo_y, hi_y = top + 0.22 * height, bottom - 0.22 * height
-        if kind == "review":
-            target = (rng.uniform(lo_x, hi_x), rng.uniform(lo_y, hi_y))
-            if self._glide(*target):
-                self.wait(rng.uniform(0.15, 0.4))
-                notches = rng.randint(2, 5)
-                for _ in range(notches):
-                    backend.scroll(1)
-                    self.wait(rng.uniform(0.06, 0.16))
-                self.wait(rng.uniform(0.5, 1.4) * self.timing.scale)
-                for _ in range(notches):
-                    backend.scroll(-1)
-                    self.wait(rng.uniform(0.06, 0.16))
-        else:
-            angle = rng.uniform(0, 2 * math.pi)
-            reach = rng.uniform(15, 110)
-            x = min(hi_x, max(lo_x, x0 + math.cos(angle) * reach)) if lo_x <= x0 <= hi_x else rng.uniform(lo_x, hi_x)
-            y = min(hi_y, max(lo_y, y0 + math.sin(angle) * reach)) if lo_y <= y0 <= hi_y else rng.uniform(lo_y, hi_y)
-            self._glide(x, y)
+        caret_y = top + 0.62 * height                            # where the caret tends to sit
+        inside = lo_x <= x0 <= hi_x and lo_y <= y0 <= hi_y
+
+        def clamp(x, y):
+            return min(hi_x, max(lo_x, x)), min(hi_y, max(lo_y, y))
+
+        mix = self.GESTURE_MIX.get(kind, {"nudge": 100})
+        gesture = rng.choices(list(mix), weights=list(mix.values()))[0]
+
+        if gesture == "read":
+            if not inside:
+                self._glide(*clamp(rng.uniform(lo_x, hi_x), caret_y + rng.gauss(0, 40)))
+            self.wait(rng.uniform(0.1, 0.35))
+            notches = rng.randint(2, 5)
+            for _ in range(notches):
+                backend.scroll(1)                                # wheel up: glance back at earlier lines
+                self.wait(rng.uniform(0.06, 0.16))
+            self.wait(rng.uniform(0.5, 1.4) * self.timing.scale)
+            for _ in range(notches):
+                backend.scroll(-1)                               # and back down to the caret
+                self.wait(rng.uniform(0.06, 0.16))
+        elif gesture == "follow":
+            self._glide(*clamp(rng.uniform(lo_x + 0.15 * width, hi_x), caret_y + rng.gauss(0, 55)))
+        elif gesture == "drift":
+            self._glide(*clamp(rng.uniform(lo_x, hi_x), rng.uniform(lo_y, hi_y)))
+        elif gesture == "aside":
+            self._glide(*clamp(hi_x - rng.uniform(0, 0.08 * width), rng.uniform(lo_y, hi_y)))
+        elif gesture == "hover":
+            center = (x0, y0) if inside else clamp(rng.uniform(lo_x, hi_x), caret_y)
+            self._hover(center)
+        else:  # nudge: the hand shifts the mouse a little without going anywhere
+            self._glide(*clamp(x0 + rng.gauss(0, 7), y0 + rng.gauss(0, 6)))
         return (time.monotonic() - started) / self.time_scale if self.time_scale else 0.0
 
     # -- checking the real buffer
