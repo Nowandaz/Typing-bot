@@ -12,7 +12,7 @@ instead of against it.
 | Bracket awareness | Lets VS Code auto-close `()`, `[]`, `{}`, quotes and `/** */`, types over the closers, presses Enter between a pair to open a block and later steps past the closing bracket with ↓ / End. |
 | Cursor navigation | Moves with arrows, Home/End, Ctrl+End and Go to Line (Ctrl+G) between lines and code blocks. |
 | Editing | Selects text with Shift+arrows or Home / Shift+End, deletes it and rewrites it. |
-| Corrections | Typos fixed with Backspace, and "first draft" slips (a wrong name, value or comparison) that are selected and retyped. Every correction is reversible: the final file is always the source file. |
+| Corrections | Finger slips (neighbouring key, swapped, doubled or skipped letter) fixed with Backspace, and code slips that still read as reasonable code (see below) that are selected and retyped. Every correction is reversible: the final file is always the source file. |
 | Multi-file workflow | Creates the files of a project, opens each one with Quick Open (Ctrl+P), types it, checks it and saves it. |
 | Code awareness | Recognises functions, classes, loops and conditions; uses them for pacing, status messages, and for jumping back to review a finished block or add a comment/import that was "forgotten". |
 
@@ -56,10 +56,20 @@ content** is ticked.
 **Preview plan** shows what would happen (keystrokes, corrections, revisits)
 without sending anything.
 
-### Emergency stop
+### While it is typing
 
-Move the mouse to the top-left corner of the primary display, or press
-**Stop**. **Pause** / **Resume** work at any time.
+* The GhostWriter window hides in the system tray (notification area) so it
+  is out of the way. The tray icon shows the current status; right-click it
+  for Pause / Stop / Show window. It comes back by itself when typing ends.
+  Untick **Hide this window…** to keep it visible.
+* **F9** pauses or resumes and **F10** stops, from anywhere, without taking
+  focus away from VS Code (change the keys in `config.json`).
+* Typing waits automatically whenever a window other than the one you
+  focused comes to the front, and carries on when you switch back. Switch
+  back with Alt+Tab or the title bar: clicking in the code moves the text
+  cursor.
+* **Emergency stop:** move the mouse to the top-left corner of the primary
+  display.
 
 ## How it works
 
@@ -89,6 +99,48 @@ source file ──► Planner ──► actions (type / key / go-to-line / pause
 * **Verification.** After typing, GhostWriter selects all, copies, and
   compares the editor with the source. If they differ it says where, and (by
   default) corrects the buffer with a single paste. This uses the clipboard.
+
+### How mistakes are chosen
+
+Mistakes are meant to look like the ones people make, not like noise.
+
+* **Finger slips** happen inside words of four letters or more, never on the
+  first letter, more often in long words, and never close together. They are
+  noticed immediately, a letter or two later, or at the end of the word.
+* **Code slips** replace one token with something that is still valid-looking
+  code: a name that already exists and is easily confused with the right one
+  (`item`/`items`, `self.width`/`self.height` when both were used together,
+  names sharing a prefix), a first idea for a new name that is then renamed,
+  an off-by-one in a comparison bound, `range()` or index, or `<` for `<=`.
+  A comparison is never flipped to its opposite, and literal data is left
+  alone. Slips are at least five lines apart and are fixed at the end of the
+  line by selecting the token and retyping it.
+* A stand-alone comment or import may be left out and added a few lines later
+  (an import: when its name is first used).
+
+All of it is driven by the `seed`, so a performance can be repeated exactly.
+
+### How the rhythm is produced
+
+* **Key timing** (`ghostwriter/motion.py`): gaps between keys are log-normal
+  (mostly quick, occasionally long) rather than evenly random. Alternating
+  hands is faster than two keys on one hand, and the same finger twice is
+  slowest. Capitals and symbols cost extra, words start a little slower (more
+  so before a long name), speed drifts slowly up and down, and now and then
+  there is a short hesitation. Each key is held down for a varying, realistic
+  time. *Natural* is roughly 80 words per minute before pauses.
+* **Repeated keys**: a few Backspaces or arrow presses are tapped; a long run
+  behaves like a held key (a delay, then the keyboard repeat rate).
+* **Pauses** between lines and before functions and classes vary the same
+  way, with an occasional long think.
+* **Mouse** (optional): the pointer stays still while typing. During some
+  pauses it drifts a little, and when a finished block is reviewed it moves
+  into the editor and scrolls up and back with the wheel. Paths are curved,
+  start and end slowly, and sometimes overshoot. GhostWriter never clicks,
+  and it lets go of the pointer the moment you move the mouse yourself.
+
+None of this hides the automation: the input is still ordinary injected
+input that the operating system and other software can identify as such.
 
 ### Recommended VS Code settings
 
@@ -122,6 +174,9 @@ changes the text, the verification step catches and corrects it.
 | `verify_after_typing`, `repair_by_paste` | Check the editor afterwards; fix differences by paste |
 | `save_files` | Ctrl+S after each file in project mode |
 | `apply_recommended_settings` | Initial state of the settings check box |
+| `hide_window_while_typing` | Hide in the system tray during a run |
+| `mouse_movement` | Initial state of the mouse check box |
+| `hotkey_pause`, `hotkey_stop` | Global keys (`f1`–`f12`, `pause`, `scrolllock`) |
 | `input_backend` | `auto` (SendInput on Windows), `sendinput`, `pyautogui` |
 | `seed` | A number makes the performance repeatable; `null` is different every time |
 
@@ -135,8 +190,9 @@ changes the text, the verification step catches and corrects it.
   configured with VS Code's language configurations, and the buffer and cursor
   are compared with the model after every keystroke.
 * **Not tested: a real VS Code on Windows.** This version was developed on
-  Linux. The `SendInput` backend, Quick Open file switching and clipboard
-  verification have not been run on Windows yet. Try the first run in a
+  Linux. The `SendInput` backend, Quick Open file switching, clipboard
+  verification, the tray icon, the global hotkeys, the focus guard and the
+  pointer movement have not been run on Windows yet. Try the first run in a
   disposable folder. If input does not arrive, set `"input_backend":
   "pyautogui"`.
 
@@ -153,11 +209,22 @@ Known limits:
   completions) are not modelled.
 * The destination editor must start empty (or use **Replace existing content**).
 
+## Logs
+
+Everything shown in the window's log line is also appended to a dated file
+under `logs/` next to the program. **Logs…** opens a viewer: pick a past run
+from the dropdown to read it, or **Open logs folder** to get at the files. The
+last 30 runs are kept. Logs hold only what the session prints — file names,
+counts and status — not machine or account details.
+
 ## Responsible use
 
 GhostWriter is for demonstrations, recordings and editor testing. It sends
 ordinary user-mode keyboard input, does not conceal that the input is
-automated, and does not try to defeat activity monitoring or proctoring.
+automated, and does not try to defeat activity monitoring, proctoring,
+keystroke-dynamics checks or any other system that distinguishes automated
+input from a physical device. Features whose purpose is to make injected
+input pass as genuine device input are intentionally out of scope.
 
 ## Development
 

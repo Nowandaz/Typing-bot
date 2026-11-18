@@ -1,2 +1,4 @@
 pyperclip>=1.8.2
 PyAutoGUI>=0.9.54
+pystray>=0.19
+Pillow>=9.0

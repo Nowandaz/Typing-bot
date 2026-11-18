@@ -55,11 +55,12 @@ _NEIGHBOURS = {
     "p": "ol", "a": "sqz", "s": "adw", "d": "sfe", "f": "dgr", "g": "fht", "h": "gjy", "j": "hku", "k": "jli",
     "l": "kop", "z": "xas", "x": "zcs", "c": "xvd", "v": "cbf", "b": "vng", "n": "bmh", "m": "nj",
 }
-_SYNONYMS = {
-    "item": "entry", "items": "entries", "index": "idx", "result": "res", "value": "val", "values": "vals",
-    "count": "total", "name": "title", "data": "info", "list": "items", "error": "err", "event": "evt",
-    "message": "msg", "number": "num", "path": "file", "text": "string", "line": "row", "lines": "rows",
-    "element": "node", "callback": "handler", "response": "result", "request": "req", "config": "options",
+# A name someone might reach for first and then change their mind about.  Only
+# used the first time a name appears, never for a name that already exists.
+_FIRST_THOUGHTS = {
+    "item": "entry", "index": "idx", "result": "res", "value": "val", "count": "total", "error": "err",
+    "event": "evt", "message": "msg", "number": "num", "element": "node", "callback": "handler",
+    "response": "result", "request": "req", "config": "options", "lines": "rows", "path": "file",
 }
 _KEYWORDS = {
     "return", "import", "from", "class", "def", "function", "const", "let", "var", "while", "for", "elif", "else",
@@ -67,7 +68,8 @@ _KEYWORDS = {
     "export", "default", "print", "pass", "raise", "except", "finally", "lambda", "with", "new", "typeof", "switch",
     "case", "try", "catch", "throw", "in", "is", "not", "and", "or", "if", "of", "str", "int", "float", "bool",
 }
-_OPERATOR_DRAFTS = {"<=": "<", ">=": ">", "==": "!=", "!=": "==", "===": "==", "!==": "!="}
+# Boundary and strictness slips; never a comparison that means the opposite.
+_OPERATOR_DRAFTS = {"<=": "<", ">=": ">", "===": "==", "!==": "!="}
 _GUARDED = {"enter", "tab", "left", "right", "up", "down", "home", "end", "ctrl+home", "ctrl+end",
             "shift+left", "shift+right", "shift+home", "shift+end"}
 _IMPORT_PY = re.compile(r"^(?:import\s+(\w+)|from\s+[\w.]+\s+import\s+(\w+))")
@@ -157,6 +159,8 @@ class Planner:
         self.pending: list[int] = []
         self.deferred: tuple | None = None       # (target line, due line, trigger name)
         self.stats = {"typos": 0, "rewrites": 0, "revisits": 0, "reviews": 0, "bracket_blocks": 0}
+        self._last_typo = -10 ** 6           # action index of the last typo
+        self._last_rewrite = -10 ** 6        # target line of the last rewrite
         self._suggest = False
         self._quiet = 0
         n = len(self.T)
@@ -349,8 +353,10 @@ class Planner:
 
     # ---------------------------------------------------------- typing a line
     def _write_line(self, i: int, allow_slips: bool = True):
-        if allow_slips and self.o.rewrites and not self._quiet and self.rng.random() < self.o.rewrites:
+        if allow_slips and self.o.rewrites and not self._quiet and i - self._last_rewrite >= 5 \
+                and self.rng.random() < self.o.rewrites:
             if self._write_with_rewrite(i):
+                self._last_rewrite = i
                 return
         self._write_plain(i, allow_slips)
 
@@ -464,32 +470,57 @@ class Planner:
 
     # ------------------------------------------------------------ corrections
     def _maybe_typo(self, want: str, k: int) -> bool:
+        """Possibly mistype the word around want[k] the way fingers do.
+
+        Slips are the common motor errors - a neighbouring key, two letters
+        in the wrong order, a doubled letter, a skipped letter - and they are
+        noticed at once, a letter or two later, or at the end of the word.
+        They are rarer in short words, never hit the first letter, and never
+        come in clusters.
+        """
         ch = want[k]
         low = ch.lower()
         if low not in _NEIGHBOURS or k == 0 or not want[k - 1].isalpha():
             return False
-        # per-word probability, spread over the letters after the first
-        if self.rng.random() >= self.o.mistakes / 3:
+        start = k
+        while start > 0 and want[start - 1].isalpha():
+            start -= 1
+        end = k
+        while end < len(want) and want[end].isalpha() and ord(want[end]) < 128:
+            end += 1
+        length = end - start
+        if length < 4 or len(self.actions) - self._last_typo < 90:
             return False
-        ed = self.ed
-        straight = ed.clone()
-        style = self.rng.choice(["now", "now", "late", "swap"])
-        tail = ""
-        if style == "late":
-            m = self.rng.randint(1, 2)
-            tail = want[k + 1:k + 1 + m]
-            if len(tail) < 1 or not all(c.isalnum() and ord(c) < 128 for c in tail):
-                style, tail = "now", ""
-        if style == "swap":
-            nxt = want[k + 1:k + 2]
-            if not nxt.isalpha() or nxt.lower() == low or ord(nxt) > 127:
-                style = "now"
-        if style == "swap":
-            typed, correct = want[k + 1] + ch, ch + want[k + 1]
-        else:
+        # about `mistakes` per five-letter word, more for long words
+        if self.rng.random() >= self.o.mistakes * min(2.0, length / 5) / (length - 1):
+            return False
+        rest_of_word = want[k + 1:end]
+        style = self.rng.choices(["neighbour", "swap", "double", "skip"], [40, 25, 15, 20])[0]
+        if style in ("swap", "skip") and (not rest_of_word or rest_of_word[0].lower() == low):
+            style = "neighbour"
+        if style == "double" and rest_of_word[:1].lower() == low:
+            style = "neighbour"
+        if style == "neighbour":
             wrong = self.rng.choice(_NEIGHBOURS[low])
-            wrong = wrong.upper() if ch.isupper() else wrong
-            typed, correct = wrong + tail, ch + tail
+            slip, good = (wrong.upper() if ch.isupper() else wrong), ch
+        elif style == "swap":
+            slip, good = rest_of_word[0] + ch, ch + rest_of_word[0]
+        elif style == "double":
+            slip, good = ch + ch, ch
+        else:
+            slip, good = rest_of_word[0], ch + rest_of_word[0]
+        following = want[k + len(good):end]
+        notice = self.rng.choices(["now", "soon", "word"], [45, 35, 20])[0]
+        if style == "skip" and notice == "now":
+            notice = "soon"               # a missing letter is only seen once more is typed
+        if notice == "soon":
+            tail = following[: self.rng.randint(1, 2)]
+        elif notice == "word" and len(following) <= 5:
+            tail = following
+        else:
+            tail = ""
+        typed, correct = slip + tail, good + tail
+        straight = self.ed.clone()
         for c in correct:
             straight.type_char(c)
         snap = self._snapshot()
@@ -508,36 +539,94 @@ class Planner:
             self._restore(snap)
             return False
         self.stats["typos"] += 1
+        self._last_typo = len(self.actions)
         return True
 
+    def _names_before(self, i: int, col: int):
+        """Identifiers already typed above (line i, col).
+
+        Returns (names, attrs, pairs): plain names and attribute names with
+        the line each was last seen on, and the set of attribute pairs that
+        have appeared together on one line on the same object (``w.width``
+        and ``w.height``) - the ones that really do get mixed up.
+        """
+        names, attrs, pairs = {}, {}, set()
+        for r in range(0, i + 1):
+            code = self.code[r] if r < i else self.code[r][:col]
+            on_line = {}
+            for m in re.finditer(r"(?:([A-Za-z_]\w*)\.)?([A-Za-z_]\w*)", code):
+                owner, word = m.group(1), m.group(2)
+                if m.start() > 0 and code[m.start() - 1] == "." and owner is None:
+                    attrs[word] = r
+                    continue
+                if owner is None:
+                    if word.lower() not in _KEYWORDS:
+                        names[word] = r
+                    continue
+                if owner.lower() not in _KEYWORDS or owner in ("self", "this"):
+                    names.setdefault(owner, r)
+                attrs[word] = r
+                for other in on_line.get(owner, ()):
+                    if other != word:
+                        pairs.add((owner, other, word))
+                        pairs.add((owner, word, other))
+                on_line.setdefault(owner, []).append(word)
+        return names, attrs, pairs
+
     def _draft_for(self, i: int):
-        """Pick a token on line ``i`` and a plausible first-draft version."""
+        """Pick a token on line ``i`` and the slip a programmer could make.
+
+        The slips are ones that still read as reasonable code:
+        * a name that already exists and is easily confused with the right
+          one (singular/plural, a sibling such as ``width``/``height`` on the
+          same object, or a name sharing a prefix);
+        * a first idea for a brand-new name that is then renamed;
+        * an off-by-one in a bound, range or index;
+        * ``<`` for ``<=`` (and the like) at a boundary.
+        """
         code = self.code[i]
         if self.lang_id not in ("python", "javascript", "typescript") or not code.strip():
             return None
-        options = []
+        everything = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", "\n".join(self.code)))
+        options, weights = [], []
         for m in re.finditer(r"[A-Za-z_][A-Za-z0-9_]*", code):
             word = m.group(0)
-            if word.lower() in _KEYWORDS or len(word) < 4:
+            if word.lower() in _KEYWORDS or len(word) < 3:
                 continue
-            if m.start() > 0 and code[m.start() - 1] == ".":
+            is_attr = m.start() > 0 and code[m.start() - 1] == "."
+            names, attrs, pairs = self._names_before(i, m.start())
+            known = attrs if is_attr else names
+            owner = re.search(r"([A-Za-z_]\w*)\.$", code[:m.start()]) if is_attr else None
+            confusable = []
+            for other, seen_on in known.items():
+                if other == word or other.lower() == word.lower() or i - seen_on > 25:
+                    continue
+                plural = other == word + "s" or word == other + "s"
+                prefix = len(word) >= 5 and len(other) >= 5 and other[:3] == word[:3] \
+                    and abs(len(other) - len(word)) <= 3
+                sibling = owner is not None and (owner.group(1), word, other) in pairs
+                if plural or prefix or sibling:
+                    confusable.append(other)
+            if confusable:
+                options.append((m.start(), m.end(), self.rng.choice(sorted(confusable)), "name"))
+                weights.append(4)
                 continue
-            draft = _SYNONYMS.get(word.lower())
-            if draft is None and len(word) >= 7 and word.isalpha() and word.islower():
-                draft = word[:4]
-            if draft and draft != word:
-                if word[0].isupper():
-                    draft = draft.capitalize()
-                options.append((m.start(), m.end(), draft, "name"))
-        for m in re.finditer(r"(?<![\w.])\d+(?![\w.])", code):
-            digits = m.group(0)
-            other = str((int(digits[-1]) + self.rng.randint(1, 8)) % 10)
-            options.append((m.start(), m.end(), digits[:-1] + other, "value"))
-        for m in re.finditer(r"(?<![<>=!])(===|!==|<=|>=|==|!=)(?![=>])", code):
+            first = _FIRST_THOUGHTS.get(word)
+            if first and not is_attr and word not in names and first not in everything:
+                options.append((m.start(), m.end(), first, "name"))
+                weights.append(3)
+        # off-by-one only where people make them: bounds, ranges and indexes
+        for m in re.finditer(r"(?:(?<=[<>]\s)|(?<=[<>]=\s)|(?<=range\()|(?<=\[))(?<!=>\s)\d{1,2}(?![\w.])", code):
+            value = int(m.group(0))
+            other = value + self.rng.choice([-1, 1]) if value > 0 else 1
+            options.append((m.start(), m.end(), str(other), "value"))
+            weights.append(1)
+        for m in re.finditer(r"(?<![<>=!])(===|!==|<=|>=)(?![=>])", code):
             options.append((m.start(), m.end(), _OPERATOR_DRAFTS[m.group(0)], "comparison"))
+            weights.append(2)
         if not options:
             return None
-        return self.rng.choice(options)
+        return self.rng.choices(options, weights)[0]
 
     def _write_with_rewrite(self, i: int) -> bool:
         """Type line ``i`` with a first-draft token, then select and fix it."""
@@ -553,7 +642,8 @@ class Planner:
         if straight is None or straight.after:
             return False
         snap = self._snapshot()
-        whole_line = self.rng.random() < 0.25 and len(want.strip()) <= 40
+        # retyping a whole line is only believable when the line is short
+        whole_line = self.rng.random() < 0.15 and len(want.strip()) <= 24
         try:
             self._quiet += 1
             self._write_plain(i, False, draft_line)
