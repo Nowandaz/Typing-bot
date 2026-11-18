@@ -132,7 +132,7 @@ def mouse_path(start, end, rng: random.Random, hz: int = 120, overshoot: bool = 
     if dist < 2:
         return [(ex, ey, 0.0)]
     points = []
-    if overshoot and dist > 280 and rng.random() < 0.3:
+    if overshoot and dist > 220 and rng.random() < 0.35:
         extra = rng.uniform(5, 16)
         mid = (ex + dx / dist * extra + rng.gauss(0, 2), ey + dy / dist * extra + rng.gauss(0, 2))
         points = mouse_path(start, mid, rng, hz, False)
@@ -157,4 +157,23 @@ def mouse_path(start, end, rng: random.Random, hz: int = 120, overshoot: bool = 
             y += rng.gauss(0, 0.5)
         points.append((round(x), round(y), dt))
     points[-1] = (round(ex), round(ey), dt)
+    if dist > 350 and len(points) > 6 and rng.random() < 0.2:
+        k = rng.randint(len(points) // 3, 2 * len(points) // 3)   # a brief mid-flight hesitation
+        x, y, pdt = points[k]
+        points[k] = (x, y, pdt + rng.uniform(0.05, 0.14))
     return points
+
+
+def hover_path(center, rng: random.Random, moves: int | None = None):
+    """A hand resting on the mouse: a few small nearby positions with short
+    holds between them.  Points are (x, y, seconds_before)."""
+    cx, cy = center
+    moves = moves if moves is not None else rng.randint(2, 4)
+    out: list = []
+    pos = (cx, cy)
+    for _ in range(moves):
+        target = (cx + rng.gauss(0, 6), cy + rng.gauss(0, 5))
+        out.extend(mouse_path(pos, target, rng, overshoot=False))
+        out.append((round(target[0]), round(target[1]), rng.uniform(0.2, 0.7)))   # the hand pauses
+        pos = target
+    return out

@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ghostwriter.actions import Key, Pause, Plan, Type
 from ghostwriter.driver import NotFocused, Runner, Stopped, Timing
 from ghostwriter.editor import VirtualEditor
-from ghostwriter.motion import PACES, Rhythm, mouse_path
+from ghostwriter.motion import PACES, Rhythm, hover_path, mouse_path
 from ghostwriter.planner import PlanOptions, plan_file
 
 from fake_vscode import FakeVSCode
@@ -126,6 +126,13 @@ class MouseTests(unittest.TestCase):
             self.assertLess(longest, max(12, distance * 0.08))    # no teleporting
             self.assertTrue(0.1 < sum(p[2] for p in path) < 2.5)
 
+    def test_hover_stays_near_its_centre_with_pauses(self):
+        path = hover_path((800, 400), random.Random(2))
+        self.assertGreater(len(path), 3)
+        for x, y, _ in path:
+            self.assertLess(math.dist((x, y), (800, 400)), 30)
+        self.assertTrue(any(dt > 0.15 for _, _, dt in path))      # the hand rests between nudges
+
     def test_path_is_curved_and_starts_and_ends_slowly(self):
         path = mouse_path((0, 0), (1000, 0), random.Random(1), overshoot=False)
         self.assertGreater(max(abs(y) for _, y, _ in path), 3)
@@ -174,6 +181,26 @@ class RunnerTests(unittest.TestCase):
         desk = Desktop({"a.py": VirtualEditor("python")})
         Runner(desk, time_scale=0).run_plan(self.plan())
         self.assertEqual(desk.moves, [])
+
+    def test_pointer_rests_during_fast_typing_and_moves_in_pauses(self):
+        # A long run of plain characters (no pauses) must not move the mouse;
+        # the gesture only fires on Pause actions.
+        desk = Desktop({"a.py": VirtualEditor("python")})
+        runner = Runner(desk, Timing(rng=random.Random(1)), time_scale=0, mouse=True)
+        runner.lock_focus()
+        runner.run_plan(Plan("x" * 40, "python", [Type("x") for _ in range(40)]))
+        self.assertEqual(desk.moves, [])
+
+    def test_gestures_vary_not_only_scrolling(self):
+        desk = Desktop({"a.py": VirtualEditor("python")})
+        runner = Runner(desk, Timing(rng=random.Random(2)), time_scale=0, mouse=True)
+        runner.lock_focus()
+        # Pauses of several kinds; gestures should both move and (sometimes) scroll.
+        kinds = ["think", "plan", "review", "notice", "line"] * 8
+        runner.run_plan(Plan("", "python", [Pause(k) for k in kinds]))
+        self.assertGreater(len(desk.moves), 10)
+        self.assertTrue(desk.wheel)
+        self.assertEqual(sum(desk.wheel), 0)
 
     def test_typing_waits_while_another_window_is_in_front(self):
         desk = Desktop({"a.py": VirtualEditor("python")})

@@ -133,11 +133,15 @@ All of it is driven by the `seed`, so a performance can be repeated exactly.
   behaves like a held key (a delay, then the keyboard repeat rate).
 * **Pauses** between lines and before functions and classes vary the same
   way, with an occasional long think.
-* **Mouse** (optional): the pointer stays still while typing. During some
-  pauses it drifts a little, and when a finished block is reviewed it moves
-  into the editor and scrolls up and back with the wheel. Paths are curved,
-  start and end slowly, and sometimes overshoot. GhostWriter never clicks,
-  and it lets go of the pointer the moment you move the mouse yourself.
+* **Mouse** (optional): the pointer stays still while keys are flowing. In the
+  pauses it does something purposeful and occasional — a hand resting on the
+  mouse and nudging it, drifting to a new spot, following down the code,
+  moving aside to type, or, when a finished block is reviewed, scrolling up to
+  glance back and returning to the caret. Movement clusters around thinking
+  and reviewing rather than firing at random. Paths are curved, start and end
+  slowly, sometimes hesitate mid-way or overshoot and settle. GhostWriter
+  never clicks (a click would move the caret), and it lets go of the pointer
+  the moment you move the mouse yourself.
 
 None of this hides the automation: the input is still ordinary injected
 input that the operating system and other software can identify as such.
