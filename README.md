@@ -209,11 +209,22 @@ Known limits:
   completions) are not modelled.
 * The destination editor must start empty (or use **Replace existing content**).
 
+## Logs
+
+Everything shown in the window's log line is also appended to a dated file
+under `logs/` next to the program. **Logs…** opens a viewer: pick a past run
+from the dropdown to read it, or **Open logs folder** to get at the files. The
+last 30 runs are kept. Logs hold only what the session prints — file names,
+counts and status — not machine or account details.
+
 ## Responsible use
 
 GhostWriter is for demonstrations, recordings and editor testing. It sends
 ordinary user-mode keyboard input, does not conceal that the input is
-automated, and does not try to defeat activity monitoring or proctoring.
+automated, and does not try to defeat activity monitoring, proctoring,
+keystroke-dynamics checks or any other system that distinguishes automated
+input from a physical device. Features whose purpose is to make injected
+input pass as genuine device input are intentionally out of scope.
 
 ## Development
 

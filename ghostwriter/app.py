@@ -12,6 +12,7 @@ from . import __version__, vscode
 from .driver import EmergencyStop, NotFocused, PACES, Runner, Stopped, Timing, create_backend
 from .languages import EXTENSIONS, LANGUAGE_LABELS, detect_language
 from .planner import PlanOptions
+from .logs import RunLog
 from .session import Job, Session, SessionOptions, jobs_from_paths
 from .tray import Hotkeys, Tray
 
@@ -56,6 +57,7 @@ class GhostWriterApp:
         self.runner: Runner | None = None
         self.worker: threading.Thread | None = None
         self.events: queue.Queue = queue.Queue()
+        self.runlog = RunLog()
 
         c = self.config
         self.pace = tk.StringVar(value=c["pace"] if c["pace"] in PACES else "Natural")
@@ -179,6 +181,7 @@ class GhostWriterApp:
         self.stop_btn.pack(side="left")
         self.preview_btn = ttk.Button(controls, text="Preview plan", command=self.preview)
         self.preview_btn.pack(side="left", padx=6)
+        ttk.Button(controls, text="Logs…", command=self.show_logs).pack(side="left")
         ttk.Label(controls, textvariable=self.status, font=("Segoe UI", 10, "bold")).pack(side="right")
 
         self.progress = ttk.Progressbar(right, mode="determinate")
@@ -308,6 +311,66 @@ class GhostWriterApp:
         self.log.insert("end", text + "\n")
         self.log.see("end")
         self.log.configure(state="disabled")
+        self.runlog.write(text)
+
+    def show_logs(self):
+        window = tk.Toplevel(self.root)
+        window.title("GhostWriter logs")
+        window.geometry("780x560")
+        top = ttk.Frame(window, padding=8)
+        top.pack(fill="x")
+        ttk.Label(top, text="Saved run logs:").pack(side="left")
+        folder = self.runlog.directory
+        ttk.Button(top, text="Open logs folder",
+                   command=lambda: self._open_path(folder)).pack(side="right")
+        picker = ttk.Combobox(top, state="readonly", width=34)
+        picker.pack(side="right", padx=8)
+
+        viewer = tk.Text(window, wrap="none", font=("Consolas", 9), state="disabled",
+                         background="#f4f5f7")
+        viewer.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        import time as _time
+        entries = self.runlog.recent(limit=30)
+        labels = [f"{_time.strftime('%Y-%m-%d %H:%M', _time.localtime(m))}  ({p.name})" for p, m in entries]
+
+        def display(_event=None):
+            index = picker.current()
+            viewer.configure(state="normal")
+            viewer.delete("1.0", "end")
+            if 0 <= index < len(entries):
+                try:
+                    viewer.insert("1.0", entries[index][0].read_text(encoding="utf-8"))
+                except OSError as exc:
+                    viewer.insert("1.0", f"Could not read this log:\n{exc}")
+            viewer.see("end")
+            viewer.configure(state="disabled")
+
+        picker.configure(values=labels)
+        picker.bind("<<ComboboxSelected>>", display)
+        if labels:
+            picker.current(0)
+            display()
+        else:
+            viewer.configure(state="normal")
+            viewer.insert("1.0", "No saved logs yet. Run a session and they will appear here, and in:\n"
+                                 f"{folder}")
+            viewer.configure(state="disabled")
+
+    def _open_path(self, path: Path):
+        import subprocess
+        import sys as _sys
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            if _sys.platform == "win32":
+                import os
+                os.startfile(str(path))                      # noqa: S606 (user-initiated)
+            elif _sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except (OSError, ValueError) as exc:
+            messagebox.showinfo("GhostWriter", f"The logs are in:\n{path}\n\n({exc})")
 
     def _build_session(self) -> Session | None:
         self._store_current()
@@ -405,6 +468,10 @@ class GhostWriterApp:
                              on_progress=lambda done, total: self.events.put(("progress", done, total)),
                              mouse=self.opt_mouse.get())
         session.log = lambda text: self.events.put(("log", text))
+        destination = str(session.o.project_dir) if session.o.project_dir else "focused editor"
+        path = self.runlog.start(f"{len(todo)} file(s) -> {destination}")
+        if path:
+            self._write_log(f"Logging this run to {path}")
         self.start_btn.configure(state="disabled")
         self.preview_btn.configure(state="disabled")
         self.pause_btn.configure(state="normal", text="Ⅱ Pause")
@@ -479,6 +546,8 @@ class GhostWriterApp:
                     messagebox.showerror("GhostWriter", event[1])
                 elif kind == "done":
                     self.status.set(event[1])
+                    self._write_log(f"Run ended: {event[1]}")
+                    self.runlog.close()
                     self.tray.notify(event[1])
                     self._show_window()
                     self.hotkeys.stop()
@@ -512,6 +581,7 @@ class GhostWriterApp:
     def close(self):
         if self.runner:
             self.runner.stop()
+        self.runlog.close()
         self.hotkeys.stop()
         self.tray.stop()
         self.root.destroy()
