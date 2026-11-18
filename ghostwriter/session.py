@@ -74,13 +74,19 @@ class Session:
     def settings_for(self, job: Job) -> EditorSettings:
         return vscode.editor_settings(job.language, self.user_settings, self.workspace_settings)
 
-    def prepare(self) -> list[str]:
-        """Plan every job.  Returns messages worth showing before starting."""
+    def prepare(self, progress=None) -> list[str]:
+        """Plan every job.  Returns messages worth showing before starting.
+
+        ``progress(done, total)`` is called after each file, so a caller on a
+        background thread can show how far planning has got - planning a large
+        project is CPU work and must not block the window.
+        """
         o = self.o
         messages = []
         self.workspace_settings = self._workspace_layer()
         managed = o.project_dir is not None and o.apply_settings
-        for job in self.jobs:
+        total = len(self.jobs)
+        for done, job in enumerate(self.jobs, start=1):
             job.notes.clear()
             settings = self.settings_for(job)
             options = PlanOptions(**o.plan.__dict__)
@@ -93,6 +99,8 @@ class Session:
                         job.plan = None
                         messages.append(f"{job.name}: already has content in the project folder - skipped "
                                         f"(tick 'Replace existing content' to overwrite it).")
+                        if progress:
+                            progress(done, total)
                         continue
                     options.replace_existing, options.existing_text = True, existing.replace("\r\n", "\n")
                 elif existing:
@@ -118,10 +126,16 @@ class Session:
                 job.plan = None
                 job.status = "failed"
                 messages.append(f"{job.name}: {exc}")
-                continue
-            label = LANGUAGE_LABELS.get(job.language, job.language)
-            self.log(f"{job.name}: {label}, {summarize(job.plan.blocks)}; {job.plan.keystrokes} keystrokes"
-                     + "".join(f"\n    note: {n}" for n in job.notes))
+            except Exception as exc:        # one broken file must not abort the batch
+                job.plan = None
+                job.status = "failed"
+                messages.append(f"{job.name}: could not be planned ({type(exc).__name__}: {exc})")
+            else:
+                label = LANGUAGE_LABELS.get(job.language, job.language)
+                self.log(f"{job.name}: {label}, {summarize(job.plan.blocks)}; {job.plan.keystrokes} keystrokes"
+                         + "".join(f"\n    note: {n}" for n in job.notes))
+            if progress:
+                progress(done, total)
         return messages
 
     def prepare_project(self):
