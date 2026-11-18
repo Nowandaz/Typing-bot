@@ -14,13 +14,15 @@ operating system or from other software.
 """
 from __future__ import annotations
 
+import math
+import os
 import random
 import sys
 import threading
 import time
-from dataclasses import dataclass
 
 from .actions import GotoLine, Key, Note, Paste, Pause, Plan, Type
+from .motion import PACES, Rhythm, mouse_path  # noqa: F401  (PACES re-exported for the UI)
 
 
 class EmergencyStop(Exception):
@@ -29,6 +31,10 @@ class EmergencyStop(Exception):
 
 class Stopped(Exception):
     pass
+
+
+class NotFocused(Exception):
+    """GhostWriter's own window still had focus when typing was due to start."""
 
 
 # ------------------------------------------------------------------ backends
@@ -90,13 +96,25 @@ class SendInputBackend:
             _anonymous_ = ("u",)
             _fields_ = [("type", wintypes.DWORD), ("u", _UNION)]
 
-        self.INPUT, self.KEYBDINPUT = INPUT, KEYBDINPUT
-        self.POINT = wintypes.POINT
+        self.INPUT, self.KEYBDINPUT, self.MOUSEINPUT = INPUT, KEYBDINPUT, MOUSEINPUT
+        self.POINT, self.RECT, self.DWORD = wintypes.POINT, wintypes.RECT, wintypes.DWORD
         self.user32 = ctypes.WinDLL("user32", use_last_error=True)
         self.user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
         self.user32.SendInput.restype = wintypes.UINT
         self.user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
         self.user32.MapVirtualKeyW.restype = wintypes.UINT
+        self.user32.GetForegroundWindow.restype = wintypes.HWND
+        self.user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+        self.user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+
+    supports_hold = True
+
+    def prepare_thread(self):
+        """Use real pixels on this thread so window and pointer coordinates agree."""
+        try:
+            self.user32.SetThreadDpiAwarenessContext(self.ctypes.c_void_p(-4))
+        except (AttributeError, OSError):
+            pass
 
     def _send(self, *events):
         """events: (vk, scan, flags) tuples sent as one atomic batch."""
@@ -113,22 +131,61 @@ class SendInputBackend:
         flags = (0x0002 if up else 0) | (0x0001 if name in self.EXTENDED else 0)
         return (vk, self.user32.MapVirtualKeyW(vk, 0), flags)
 
-    def type_char(self, ch):
+    def type_char(self, ch, hold=0.0):
         data = ch.encode("utf-16-le")
-        for i in range(0, len(data), 2):
-            unit = int.from_bytes(data[i:i + 2], "little")
-            self._send((0, unit, 0x0004), (0, unit, 0x0004 | 0x0002))  # KEYEVENTF_UNICODE down, up
+        units = [int.from_bytes(data[i:i + 2], "little") for i in range(0, len(data), 2)]
+        for unit in units:                                    # KEYEVENTF_UNICODE key down
+            self._send((0, unit, 0x0004))
+        if hold:
+            time.sleep(hold)
+        for unit in units:
+            self._send((0, unit, 0x0004 | 0x0002))
 
-    def key(self, name):
+    def key(self, name, hold=0.0):
         parts = name.split("+")
         mods, main = parts[:-1], parts[-1]
-        for m in mods:
-            self._send(self._vk_event(m))
-        time.sleep(0.005 if mods else 0)
-        self._send(self._vk_event(main))
-        self._send(self._vk_event(main, up=True))
-        for m in reversed(mods):
-            self._send(self._vk_event(m, up=True))
+        try:
+            for m in mods:
+                self._send(self._vk_event(m))
+            if mods:
+                time.sleep(0.02 if hold else 0.005)
+            self._send(self._vk_event(main))
+            if hold:
+                time.sleep(hold)
+            self._send(self._vk_event(main, up=True))
+        finally:
+            for m in reversed(mods):                          # never leave a modifier stuck down
+                self._send(self._vk_event(m, up=True))
+
+    # -- focus
+    def foreground(self):
+        return self.user32.GetForegroundWindow()
+
+    def is_own_window(self, hwnd) -> bool:
+        pid = self.DWORD(0)
+        self.user32.GetWindowThreadProcessId(hwnd, self.ctypes.byref(pid))
+        return pid.value == os.getpid()
+
+    def window_rect(self, hwnd=None):
+        rect = self.RECT()
+        if not self.user32.GetWindowRect(hwnd or self.foreground(), self.ctypes.byref(rect)):
+            return None
+        return rect.left, rect.top, rect.right, rect.bottom
+
+    # -- pointer (moves and wheel only; GhostWriter never clicks)
+    def mouse_pos(self):
+        point = self.POINT()
+        self.user32.GetCursorPos(self.ctypes.byref(point))
+        return point.x, point.y
+
+    def mouse_move(self, x, y):
+        self.user32.SetCursorPos(int(x), int(y))
+
+    def scroll(self, notches):
+        item = self.INPUT()
+        item.type = 0  # INPUT_MOUSE
+        item.mi = self.MOUSEINPUT(0, 0, (int(notches) * 120) & 0xFFFFFFFF, 0x0800, 0, 0)   # MOUSEEVENTF_WHEEL
+        self.user32.SendInput(1, self.ctypes.byref(item), self.ctypes.sizeof(self.INPUT))
 
     def set_clipboard(self, text):
         import pyperclip
@@ -182,6 +239,19 @@ class PyAutoGuiBackend:
         if tuple(self.gui.position()) == (0, 0):
             raise EmergencyStop()
 
+    def mouse_pos(self):
+        return tuple(self.gui.position())
+
+    def mouse_move(self, x, y):
+        self.gui.moveTo(int(x), int(y), _pause=False)
+
+    def scroll(self, notches):
+        self.gui.scroll(int(notches))
+
+    def window_rect(self, hwnd=None):
+        width, height = self.gui.size()
+        return 0, 0, width, height
+
 
 def create_backend(kind: str = "auto"):
     if kind == "sendinput" or (kind == "auto" and sys.platform == "win32"):
@@ -190,57 +260,12 @@ def create_backend(kind: str = "auto"):
 
 
 # -------------------------------------------------------------------- timing
-PACES = {            # mean seconds per key, spread, pause scale
-    "Slow": (0.105, 0.075, 1.3),
-    "Natural": (0.065, 0.055, 1.0),
-    "Fast": (0.035, 0.030, 0.6),
-    "Very fast": (0.018, 0.018, 0.3),
-}
-PAUSES = {           # seconds (min, max) at Natural pace
-    "line": (0.18, 0.65), "plan": (0.4, 1.1), "think": (1.0, 3.5), "notice": (0.3, 0.8),
-    "review": (1.2, 2.8), "settle": (0.15, 0.3),
-}
+class Timing(Rhythm):
+    """Keystroke rhythm configured from config.json values."""
 
-
-@dataclass
-class Timing:
-    pace: str = "Natural"
-    think_min: float = 1.0
-    think_max: float = 3.5
-    line_min: float = 0.18
-    line_max: float = 0.65
-    rng: random.Random | None = None
-
-    def __post_init__(self):
-        self.rng = self.rng or random.Random()
-
-    def keystroke(self, action, previous) -> float:
-        mean, spread, _ = PACES.get(self.pace, PACES["Natural"])
-        rng = self.rng
-        delay = max(0.008, rng.gauss(mean, spread))
-        if isinstance(action, Type):
-            ch = action.ch
-            if ch in "{}[]()=+-*/<>":
-                delay += rng.uniform(0.035, 0.12) * mean / 0.065
-            elif ch in ".,:;":
-                delay += rng.uniform(0.025, 0.09) * mean / 0.065
-            elif ch == " ":
-                delay *= rng.uniform(0.65, 1.0)
-        elif isinstance(action, Key):
-            if previous == action:
-                delay = max(0.012, rng.gauss(mean * 0.55, spread * 0.3))   # held / repeated key
-            elif action.name.startswith(("shift+", "ctrl+")) or action.name in ("home", "end"):
-                delay += rng.uniform(0.05, 0.16)
-        return min(delay, 1.2)
-
-    def pause(self, kind: str) -> float:
-        lo, hi = PAUSES.get(kind, PAUSES["line"])
-        if kind == "think":
-            lo, hi = self.think_min, self.think_max
-        elif kind == "line":
-            lo, hi = self.line_min, self.line_max
-        scale = PACES.get(self.pace, PACES["Natural"])[2]
-        return self.rng.uniform(lo, hi) * scale
+    def __init__(self, pace: str = "Natural", think_min: float = 1.0, think_max: float = 3.5,
+                 line_min: float = 0.18, line_max: float = 0.65, rng: random.Random | None = None):
+        super().__init__(pace, rng, think=(think_min, think_max), line=(line_min, line_max))
 
 
 # -------------------------------------------------------------------- runner
@@ -248,7 +273,7 @@ class Runner:
     """Executes plans with pause/stop support.  Runs on a worker thread."""
 
     def __init__(self, backend, timing: Timing | None = None, on_status=None, on_progress=None,
-                 sleep=time.sleep, time_scale: float = 1.0):
+                 sleep=time.sleep, time_scale: float = 1.0, mouse: bool = False):
         self.backend = backend
         self.timing = timing or Timing()
         self.on_status = on_status or (lambda text: None)
@@ -258,6 +283,9 @@ class Runner:
         self.run_event.set()
         self._sleep = sleep
         self.time_scale = time_scale        # 0 makes every wait instantaneous (tests)
+        self.mouse = mouse                  # move / scroll the pointer during pauses
+        self.focus_target = None            # window that must stay in the foreground
+        self._last_status = ""
 
     # -- control
     def stop(self):
@@ -270,9 +298,33 @@ class Runner:
     def resume(self):
         self.run_event.set()
 
+    def toggle(self):
+        if self.paused:
+            self.resume()
+        else:
+            self.pause()
+
     @property
     def paused(self) -> bool:
         return not self.run_event.is_set()
+
+    def status(self, text: str):
+        self._last_status = text
+        self.on_status(text)
+
+    def lock_focus(self):
+        """Remember the window that has focus now; typing waits whenever
+        another window comes to the front."""
+        prepare = getattr(self.backend, "prepare_thread", None)
+        if prepare:
+            prepare()
+        foreground = getattr(self.backend, "foreground", None)
+        if foreground is None:
+            return
+        hwnd = foreground()
+        if hwnd and self.backend.is_own_window(hwnd):
+            raise NotFocused()
+        self.focus_target = hwnd or None
 
     def _checkpoint(self):
         while not self.run_event.wait(0.1):
@@ -281,6 +333,16 @@ class Runner:
         if self.stop_event.is_set():
             raise Stopped()
         self.backend.check_failsafe()
+        if self.focus_target is not None and self.backend.foreground() != self.focus_target:
+            previous = self._last_status
+            self.on_status("Waiting: VS Code is not the active window")
+            while self.backend.foreground() != self.focus_target:
+                if self.stop_event.is_set():
+                    raise Stopped()
+                self.backend.check_failsafe()
+                self._sleep(0.1 if self.time_scale else 0)
+            self._sleep(0.8 * self.time_scale)          # let the window settle before typing on
+            self.on_status(previous or "Typing")
 
     def wait(self, seconds: float):
         until = time.monotonic() + seconds * self.time_scale
@@ -292,51 +354,148 @@ class Runner:
             self._sleep(min(0.04, left))
 
     # -- sending
+    def _press(self, name: str, hold: float = 0.0):
+        if hold and getattr(self.backend, "supports_hold", False):
+            self.backend.key(name, hold * self.time_scale)
+        else:
+            self.backend.key(name)
+
+    def _char(self, ch: str, hold: float = 0.0):
+        if hold and getattr(self.backend, "supports_hold", False):
+            self.backend.type_char(ch, hold * self.time_scale)
+        else:
+            self.backend.type_char(ch)
+
     def send_key(self, name: str, settle: float = 0.0):
         self._checkpoint()
-        self.backend.key(name)
+        self._press(name, self.timing.hold(0.2))
         if settle:
             self.wait(settle)
 
-    def send_text(self, text: str, delay: float = 0.03):
+    def send_text(self, text: str, delay: float | None = None):
+        """Type text into a prompt (Quick Open, Go to Line) at typing speed."""
+        prev = None
         for ch in text:
-            self._checkpoint()
-            self.backend.type_char(ch)
-            self.wait(delay)
+            gap = self.timing.char_gap(ch, prev) if delay is None else delay
+            self.wait(gap)
+            self._char(ch, self.timing.hold(gap))
+            prev = ch
 
     def run_plan(self, plan: Plan):
+        actions = plan.actions
         total = plan.keystrokes
         done = 0
-        previous = None
-        for action in plan.actions:
+        prev_char = None            # last typed character (None after any other key)
+        run_gaps: list[float] = []  # gaps left for the current run of identical keys
+        run_name = None
+        for index, action in enumerate(actions):
             self._checkpoint()
             if isinstance(action, Note):
-                self.on_status(action.text)
+                self.status(action.text)
                 continue
             if isinstance(action, Pause):
-                self.wait(self.timing.pause(action.kind))
+                length = self.timing.pause(action.kind)
+                spent = self._pointer_gesture(action.kind) if self.mouse else 0.0
+                self.wait(max(0.0, length - spent))
+                prev_char, run_name = None, None
                 continue
             if isinstance(action, Type):
-                self.backend.type_char(action.ch)
+                ahead = 0
+                if prev_char in (" ", None):
+                    while index + ahead < len(actions) and isinstance(actions[index + ahead], Type) \
+                            and (actions[index + ahead].ch.isalnum() or actions[index + ahead].ch == "_"):
+                        ahead += 1
+                gap = self.timing.char_gap(action.ch, prev_char, ahead)
+                self.wait(gap)
+                self._char(action.ch, self.timing.hold(gap))
+                prev_char, run_name = action.ch, None
             elif isinstance(action, Key):
-                self.backend.key(action.name)
+                if action.name != run_name or not run_gaps:
+                    count = 1
+                    while index + count < len(actions) and actions[index + count] == action:
+                        count += 1
+                    run_gaps = self.timing.key_gaps(action.name, count)
+                    run_name = action.name
+                gap = run_gaps.pop(0)
+                self.wait(gap)
+                self._press(action.name, self.timing.hold(gap))
+                prev_char = None
             elif isinstance(action, Paste):
                 self.backend.set_clipboard(action.text)
                 self.wait(0.05)
-                self.backend.key("ctrl+v")
+                self._press("ctrl+v")
                 self.wait(0.08)
+                prev_char, run_name = None, None
             elif isinstance(action, GotoLine):
-                self.backend.key("ctrl+g")
-                self.wait(0.35)
-                self.send_text(str(action.line), 0.06)
-                self.wait(0.15)
-                self.backend.key("enter")
+                self.wait(self.timing.key_gaps("ctrl+g", 1)[0])
+                self._press("ctrl+g", self.timing.hold(0.2))
+                self.wait(0.4)
+                self.send_text(str(action.line))
+                self.wait(0.2)
+                self._press("enter", self.timing.hold(0.2))
                 self.wait(0.3)
+                prev_char, run_name = None, None
             done += 1
             if done % 5 == 0 or done == total:
                 self.on_progress(done, total)
-            self.wait(self.timing.keystroke(action, previous))
-            previous = action
+
+    # -- pointer
+    def _glide(self, x: float, y: float) -> bool:
+        """Move the pointer along a hand-like path.  Gives up (returns False)
+        as soon as the person moves the mouse themselves."""
+        backend = self.backend
+        last = backend.mouse_pos()
+        for px, py, dt in mouse_path(last, (x, y), self.timing.rng):
+            self.wait(dt)
+            now = backend.mouse_pos()
+            if math.hypot(now[0] - last[0], now[1] - last[1]) > 6:
+                return False
+            backend.mouse_move(px, py)
+            last = (px, py)
+        return True
+
+    def _pointer_gesture(self, kind: str) -> float:
+        """Occasionally nudge the mouse, or scroll back while reviewing.
+
+        Only moves and wheel scrolling are used - never a click, which would
+        move the text cursor.  Returns the seconds it took.
+        """
+        backend, rng = self.backend, self.timing.rng
+        if not hasattr(backend, "mouse_move"):
+            return 0.0
+        chance = {"review": 0.7, "think": 0.2, "plan": 0.05}.get(kind, 0.0)
+        if rng.random() >= chance:
+            return 0.0
+        rect = backend.window_rect(self.focus_target) if self.focus_target else backend.window_rect()
+        if not rect:
+            return 0.0
+        left, top, right, bottom = rect
+        width, height = right - left, bottom - top
+        if width < 300 or height < 200:
+            return 0.0
+        started = time.monotonic()
+        x0, y0 = backend.mouse_pos()
+        lo_x, hi_x = left + 0.40 * width, right - 0.10 * width      # the editor area, away from side bars
+        lo_y, hi_y = top + 0.22 * height, bottom - 0.22 * height
+        if kind == "review":
+            target = (rng.uniform(lo_x, hi_x), rng.uniform(lo_y, hi_y))
+            if self._glide(*target):
+                self.wait(rng.uniform(0.15, 0.4))
+                notches = rng.randint(2, 5)
+                for _ in range(notches):
+                    backend.scroll(1)
+                    self.wait(rng.uniform(0.06, 0.16))
+                self.wait(rng.uniform(0.5, 1.4) * self.timing.scale)
+                for _ in range(notches):
+                    backend.scroll(-1)
+                    self.wait(rng.uniform(0.06, 0.16))
+        else:
+            angle = rng.uniform(0, 2 * math.pi)
+            reach = rng.uniform(15, 110)
+            x = min(hi_x, max(lo_x, x0 + math.cos(angle) * reach)) if lo_x <= x0 <= hi_x else rng.uniform(lo_x, hi_x)
+            y = min(hi_y, max(lo_y, y0 + math.sin(angle) * reach)) if lo_y <= y0 <= hi_y else rng.uniform(lo_y, hi_y)
+            self._glide(x, y)
+        return (time.monotonic() - started) / self.time_scale if self.time_scale else 0.0
 
     # -- checking the real buffer
     def read_buffer(self) -> str | None:

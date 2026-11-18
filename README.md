@@ -56,10 +56,20 @@ content** is ticked.
 **Preview plan** shows what would happen (keystrokes, corrections, revisits)
 without sending anything.
 
-### Emergency stop
+### While it is typing
 
-Move the mouse to the top-left corner of the primary display, or press
-**Stop**. **Pause** / **Resume** work at any time.
+* The GhostWriter window hides in the system tray (notification area) so it
+  is out of the way. The tray icon shows the current status; right-click it
+  for Pause / Stop / Show window. It comes back by itself when typing ends.
+  Untick **Hide this window…** to keep it visible.
+* **F9** pauses or resumes and **F10** stops, from anywhere, without taking
+  focus away from VS Code (change the keys in `config.json`).
+* Typing waits automatically whenever a window other than the one you
+  focused comes to the front, and carries on when you switch back. Switch
+  back with Alt+Tab or the title bar: clicking in the code moves the text
+  cursor.
+* **Emergency stop:** move the mouse to the top-left corner of the primary
+  display.
 
 ## How it works
 
@@ -110,6 +120,28 @@ Mistakes are meant to look like the ones people make, not like noise.
 
 All of it is driven by the `seed`, so a performance can be repeated exactly.
 
+### How the rhythm is produced
+
+* **Key timing** (`ghostwriter/motion.py`): gaps between keys are log-normal
+  (mostly quick, occasionally long) rather than evenly random. Alternating
+  hands is faster than two keys on one hand, and the same finger twice is
+  slowest. Capitals and symbols cost extra, words start a little slower (more
+  so before a long name), speed drifts slowly up and down, and now and then
+  there is a short hesitation. Each key is held down for a varying, realistic
+  time. *Natural* is roughly 80 words per minute before pauses.
+* **Repeated keys**: a few Backspaces or arrow presses are tapped; a long run
+  behaves like a held key (a delay, then the keyboard repeat rate).
+* **Pauses** between lines and before functions and classes vary the same
+  way, with an occasional long think.
+* **Mouse** (optional): the pointer stays still while typing. During some
+  pauses it drifts a little, and when a finished block is reviewed it moves
+  into the editor and scrolls up and back with the wheel. Paths are curved,
+  start and end slowly, and sometimes overshoot. GhostWriter never clicks,
+  and it lets go of the pointer the moment you move the mouse yourself.
+
+None of this hides the automation: the input is still ordinary injected
+input that the operating system and other software can identify as such.
+
 ### Recommended VS Code settings
 
 Features that react to typing *asynchronously* — IntelliSense accepting a
@@ -142,6 +174,9 @@ changes the text, the verification step catches and corrects it.
 | `verify_after_typing`, `repair_by_paste` | Check the editor afterwards; fix differences by paste |
 | `save_files` | Ctrl+S after each file in project mode |
 | `apply_recommended_settings` | Initial state of the settings check box |
+| `hide_window_while_typing` | Hide in the system tray during a run |
+| `mouse_movement` | Initial state of the mouse check box |
+| `hotkey_pause`, `hotkey_stop` | Global keys (`f1`–`f12`, `pause`, `scrolllock`) |
 | `input_backend` | `auto` (SendInput on Windows), `sendinput`, `pyautogui` |
 | `seed` | A number makes the performance repeatable; `null` is different every time |
 
@@ -155,8 +190,9 @@ changes the text, the verification step catches and corrects it.
   configured with VS Code's language configurations, and the buffer and cursor
   are compared with the model after every keystroke.
 * **Not tested: a real VS Code on Windows.** This version was developed on
-  Linux. The `SendInput` backend, Quick Open file switching and clipboard
-  verification have not been run on Windows yet. Try the first run in a
+  Linux. The `SendInput` backend, Quick Open file switching, clipboard
+  verification, the tray icon, the global hotkeys, the focus guard and the
+  pointer movement have not been run on Windows yet. Try the first run in a
   disposable folder. If input does not arrive, set `"input_backend":
   "pyautogui"`.
 

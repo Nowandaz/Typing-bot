@@ -9,10 +9,11 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from . import __version__, vscode
-from .driver import EmergencyStop, PACES, Runner, Stopped, Timing, create_backend
+from .driver import EmergencyStop, NotFocused, PACES, Runner, Stopped, Timing, create_backend
 from .languages import EXTENSIONS, LANGUAGE_LABELS, detect_language
 from .planner import PlanOptions
 from .session import Job, Session, SessionOptions, jobs_from_paths
+from .tray import Hotkeys, Tray
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 DEFAULTS = {
@@ -25,6 +26,8 @@ DEFAULTS = {
     "dismiss_suggestions": True, "verify_after_typing": True, "repair_by_paste": True,
     "save_files": True, "apply_recommended_settings": True,
     "input_backend": "auto", "seed": None,
+    "hide_window_while_typing": True, "mouse_movement": True,
+    "hotkey_pause": "f9", "hotkey_stop": "f10",
 }
 PASTED = "Pasted code"
 CODE_TYPES = " ".join("*" + ext for ext in sorted(EXTENSIONS)) + " *.json *.md *.txt"
@@ -45,8 +48,8 @@ class GhostWriterApp:
         self.root = root
         self.config = load_config()
         root.title(f"GhostWriter {__version__}")
-        root.geometry("1040x760")
-        root.minsize(900, 640)
+        root.geometry("1040x840")
+        root.minsize(900, 720)
 
         self.jobs: list[Job] = [Job(PASTED, "", "python")]
         self.current = 0
@@ -66,6 +69,11 @@ class GhostWriterApp:
         self.opt_verify = tk.BooleanVar(value=bool(c["verify_after_typing"]))
         self.opt_replace = tk.BooleanVar(value=False)
         self.opt_settings = tk.BooleanVar(value=bool(c["apply_recommended_settings"]))
+        self.opt_hide = tk.BooleanVar(value=bool(c["hide_window_while_typing"]))
+        self.opt_mouse = tk.BooleanVar(value=bool(c["mouse_movement"]))
+        self.tray = Tray(lambda command: self.events.put(("tray", command)))
+        self.hotkeys = Hotkeys()
+        self.hidden = False
 
         self._build()
         self._refresh_list()
@@ -156,6 +164,10 @@ class GhostWriterApp:
                         variable=self.opt_verify).grid(row=2, column=2, columnspan=2, sticky="w")
         ttk.Checkbutton(behave, text="Replace existing content", variable=self.opt_replace).grid(
             row=1, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(behave, text="Move the mouse during pauses", variable=self.opt_mouse).grid(
+            row=2, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(behave, text="Hide this window in the system tray while typing",
+                        variable=self.opt_hide).grid(row=3, column=2, columnspan=2, sticky="w")
 
         controls = ttk.Frame(right)
         controls.pack(fill="x", pady=(8, 0))
@@ -171,13 +183,16 @@ class GhostWriterApp:
 
         self.progress = ttk.Progressbar(right, mode="determinate")
         self.progress.pack(fill="x", pady=(6, 4))
-        self.log = tk.Text(right, height=7, wrap="word", state="disabled", font=("Consolas", 9),
+        self.log = tk.Text(right, height=6, wrap="word", state="disabled", font=("Consolas", 9),
                            background="#f4f5f7")
         self.log.pack(fill="x")
         ttk.Label(
             right, wraplength=760, foreground="#666",
             text="GhostWriter sends ordinary keyboard input to the focused window. Use a scratch file or a "
-                 "disposable project folder. Emergency stop: move the mouse to the top-left corner of the screen."
+                 "disposable project folder. While typing: "
+                 f"{self.config['hotkey_pause'].upper()} pauses or resumes, "
+                 f"{self.config['hotkey_stop'].upper()} stops, and moving the mouse to the top-left corner "
+                 "of the screen is the emergency stop."
         ).pack(anchor="w", pady=(6, 0))
         self._mode_changed()
 
@@ -387,14 +402,41 @@ class GhostWriterApp:
                         line_max=c["line_pause_max_s"])
         self.runner = Runner(backend, timing,
                              on_status=lambda text: self.events.put(("status", text)),
-                             on_progress=lambda done, total: self.events.put(("progress", done, total)))
+                             on_progress=lambda done, total: self.events.put(("progress", done, total)),
+                             mouse=self.opt_mouse.get())
         session.log = lambda text: self.events.put(("log", text))
         self.start_btn.configure(state="disabled")
         self.preview_btn.configure(state="disabled")
         self.pause_btn.configure(state="normal", text="Ⅱ Pause")
         self.stop_btn.configure(state="normal")
+        self.hotkeys.start({c["hotkey_pause"]: lambda: self.events.put(("tray", "toggle")),
+                            c["hotkey_stop"]: lambda: self.events.put(("tray", "stop"))})
+        for name in self.hotkeys.failed:
+            self._write_log(f"! Hotkey {name.upper()} is already taken by another program.")
+        if self.opt_hide.get():
+            self._hide_window(int(c["countdown_seconds"]))
         self.worker = threading.Thread(target=self._run, args=(session,), daemon=True)
         self.worker.start()
+
+    # ------------------------------------------------------------------- tray
+    def _hide_window(self, countdown: int):
+        self.hidden = True
+        if self.tray.start():
+            self.root.withdraw()
+            self.tray.notify(f"Typing starts in {countdown} s - click into VS Code. "
+                             f"{self.config['hotkey_pause'].upper()} pauses, "
+                             f"{self.config['hotkey_stop'].upper()} stops.")
+        else:
+            # no tray support installed: get out of the way on the taskbar instead
+            self._write_log("Tray icon unavailable (pip install pystray pillow); minimising instead.")
+            self.root.iconify()
+
+    def _show_window(self):
+        if self.hidden:
+            self.hidden = False
+            self.root.deiconify()
+            self.root.lift()
+        self.tray.stop()
 
     def _run(self, session: Session):
         try:
@@ -404,6 +446,10 @@ class GhostWriterApp:
             final = "Stopped"
         except EmergencyStop:
             final = "Emergency stop"
+        except NotFocused:
+            self.events.put(("error", "GhostWriter's own window still had focus when the countdown ended.\n\n"
+                                      "Click into the VS Code editor during the countdown."))
+            final = "Not started"
         except Exception as exc:
             self.events.put(("error", str(exc)))
             final = "Error"
@@ -416,14 +462,27 @@ class GhostWriterApp:
                 kind = event[0]
                 if kind == "status":
                     self.status.set(event[1])
+                    self.tray.update(status=event[1])
+                elif kind == "tray":
+                    if event[1] == "toggle":
+                        self.toggle_pause()
+                    elif event[1] == "stop":
+                        self.stop()
+                    elif event[1] == "show":
+                        self._show_window()
                 elif kind == "progress":
                     self.progress.configure(maximum=max(1, event[2]), value=event[1])
                 elif kind == "log":
                     self._write_log(event[1])
                 elif kind == "error":
+                    self._show_window()
                     messagebox.showerror("GhostWriter", event[1])
                 elif kind == "done":
                     self.status.set(event[1])
+                    self.tray.notify(event[1])
+                    self._show_window()
+                    self.hotkeys.stop()
+                    self.runner = None
                     self.start_btn.configure(state="normal")
                     self.preview_btn.configure(state="normal")
                     self.pause_btn.configure(state="disabled", text="Ⅱ Pause")
@@ -443,6 +502,7 @@ class GhostWriterApp:
             self.runner.pause()
             self.pause_btn.configure(text="▶ Resume")
             self.status.set("Paused")
+        self.tray.update(status=self.status.get(), paused=self.runner.paused)
 
     def stop(self):
         if self.runner:
@@ -452,6 +512,8 @@ class GhostWriterApp:
     def close(self):
         if self.runner:
             self.runner.stop()
+        self.hotkeys.stop()
+        self.tray.stop()
         self.root.destroy()
 
 

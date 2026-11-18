@@ -152,14 +152,15 @@ class Session:
         for remaining in range(o.countdown, 0, -1):
             runner.on_status(f"Focus VS Code… {remaining}")
             runner.wait(1.0)
+        runner.lock_focus()
         todo = [j for j in self.jobs if j.plan is not None]
         for number, job in enumerate(todo, start=1):
             prefix = f"[{number}/{len(todo)}] " if len(todo) > 1 else ""
             if o.project_dir is not None:
-                runner.on_status(f"{prefix}Opening {job.name}")
+                runner.status(f"{prefix}Opening {job.name}")
                 runner.send_key("escape", 0.1)
                 runner.send_key("ctrl+p", 0.5)
-                runner.send_text(job.name.replace("\\", "/"), 0.035)
+                runner.send_text(job.name.replace("\\", "/"))
                 runner.wait(0.7)
                 runner.send_key("enter", 1.0)
             job.status = "typing"
@@ -167,7 +168,7 @@ class Session:
             runner.run_plan(job.plan)
             job.status = "typed"
             if o.verify:
-                runner.on_status(f"{prefix}Checking {job.name}")
+                runner.status(f"{prefix}Checking {job.name}")
                 outcome = runner.verify(job.plan.target, o.repair)
                 job.status = {"match": "verified", "repaired": "repaired"}.get(outcome, outcome)
                 if outcome == "match":
@@ -182,7 +183,7 @@ class Session:
                              f"{first_difference(job.plan.target, actual)}")
             if o.project_dir is not None and o.save and job.status in ("typed", "verified", "repaired"):
                 runner.send_key("ctrl+s", 0.5)
-        runner.on_status("Finished")
+        runner.status("Finished")
 
 
 def jobs_from_paths(paths: list[Path], root: Path | None = None) -> list[Job]:
