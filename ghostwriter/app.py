@@ -29,6 +29,7 @@ DEFAULTS = {
     "save_files": True, "apply_recommended_settings": True,
     "input_backend": "auto", "seed": None,
     "hide_window_while_typing": True, "mouse_movement": True,
+    "close_when_finished": False,
     "hotkey_pause": "f9", "hotkey_stop": "f10",
 }
 PASTED = "Pasted code"
@@ -50,8 +51,8 @@ class GhostWriterApp:
         self.root = root
         self.config = load_config()
         root.title(f"GhostWriter {__version__}")
-        root.geometry("1040x840")
-        root.minsize(900, 720)
+        root.geometry("1060x900")
+        root.minsize(960, 820)
 
         self.jobs: list[Job] = [Job(PASTED, "", "python")]
         self.current = 0
@@ -61,6 +62,7 @@ class GhostWriterApp:
         self.runlog = RunLog()
         self._on_plan_done = None
         self._pending_backend = None
+        self._closing = False
 
         c = self.config
         self.pace = tk.StringVar(value=c["pace"] if c["pace"] in PACES else "Natural")
@@ -76,130 +78,222 @@ class GhostWriterApp:
         self.opt_settings = tk.BooleanVar(value=bool(c["apply_recommended_settings"]))
         self.opt_hide = tk.BooleanVar(value=bool(c["hide_window_while_typing"]))
         self.opt_mouse = tk.BooleanVar(value=bool(c["mouse_movement"]))
+        self.opt_close = tk.BooleanVar(value=bool(c["close_when_finished"]))
         self.tray = Tray(lambda command: self.events.put(("tray", command)))
         self.hotkeys = Hotkeys()
         self.hidden = False
 
+        self._setup_style()
         self._build()
         self._refresh_list()
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(80, self._drain)
 
+    # ------------------------------------------------------------------- theme
+    def _setup_style(self):
+        p = self.palette = {
+            "bg": "#eef1f6", "surface": "#ffffff", "border": "#d7dde6",
+            "ink": "#1e2733", "muted": "#687385", "subtle": "#97a1b0",
+            "accent": "#2f6feb", "accent_active": "#2458c6", "accent_fg": "#ffffff",
+            "accent_soft": "#a9c1f4", "danger": "#c0392b",
+            "editor_bg": "#1b1f27", "editor_fg": "#e7eaf0", "caret": "#7aa2f7",
+            "console_bg": "#f5f7fa",
+        }
+        self.root.configure(background=p["bg"])
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        base = ("Segoe UI", 10)
+        style.configure(".", background=p["bg"], foreground=p["ink"], font=base,
+                        bordercolor=p["border"], focuscolor=p["bg"])
+        style.configure("TFrame", background=p["bg"])
+        style.configure("Card.TFrame", background=p["surface"], bordercolor=p["border"], relief="solid",
+                        borderwidth=1)
+        style.configure("CardBody.TFrame", background=p["surface"], relief="flat", borderwidth=0)
+        style.configure("TLabel", background=p["bg"], foreground=p["ink"])
+        style.configure("Card.TLabel", background=p["surface"], foreground=p["ink"])
+        style.configure("Muted.TLabel", background=p["bg"], foreground=p["muted"])
+        style.configure("CardMuted.TLabel", background=p["surface"], foreground=p["muted"])
+        style.configure("Title.TLabel", background=p["bg"], foreground=p["ink"],
+                        font=("Segoe UI Semibold", 18))
+        style.configure("Subtitle.TLabel", background=p["bg"], foreground=p["muted"],
+                        font=("Segoe UI", 9))
+        style.configure("Section.TLabel", background=p["surface"], foreground=p["subtle"],
+                        font=("Segoe UI", 8, "bold"))
+        style.configure("Status.TLabel", background=p["bg"], foreground=p["muted"],
+                        font=("Segoe UI Semibold", 10))
+        # buttons
+        style.configure("TButton", background="#e4e9f0", foreground=p["ink"], relief="flat",
+                        padding=(13, 7), borderwidth=0)
+        style.map("TButton", background=[("pressed", "#d2dae5"), ("active", "#d9e0ea"),
+                                         ("disabled", "#eef1f6")],
+                  foreground=[("disabled", p["subtle"])])
+        style.configure("Accent.TButton", background=p["accent"], foreground=p["accent_fg"], padding=(18, 8))
+        style.map("Accent.TButton", background=[("pressed", p["accent_active"]), ("active", p["accent_active"]),
+                                                ("disabled", p["accent_soft"])],
+                  foreground=[("disabled", "#eef3fd")])
+        style.configure("Ghost.TButton", background=p["surface"], foreground=p["ink"], padding=(11, 6))
+        style.map("Ghost.TButton", background=[("active", "#eef2f7"), ("pressed", "#e6ecf4")])
+        for name in ("TCheckbutton", "TRadiobutton"):
+            style.configure(name, background=p["surface"], foreground=p["ink"], focuscolor=p["surface"])
+            style.map(name, background=[("active", p["surface"])],
+                      indicatorcolor=[("selected", p["accent"])])
+        style.configure("TEntry", fieldbackground=p["surface"], bordercolor=p["border"], padding=5)
+        style.configure("TCombobox", fieldbackground=p["surface"], bordercolor=p["border"],
+                        arrowcolor=p["ink"], padding=4)
+        style.map("TCombobox", fieldbackground=[("readonly", p["surface"])],
+                  foreground=[("readonly", p["ink"])])
+        self.root.option_add("*TCombobox*Listbox.background", p["surface"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", p["accent"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", p["accent_fg"])
+        style.configure("Horizontal.TProgressbar", troughcolor="#dfe5ee", background=p["accent"],
+                        bordercolor="#dfe5ee", lightcolor=p["accent"], darkcolor=p["accent"], thickness=6)
+
+    def _card(self, parent, title=None, pad=14):
+        card = ttk.Frame(parent, style="Card.TFrame")
+        inner = ttk.Frame(card, style="CardBody.TFrame", padding=pad)
+        inner.pack(fill="both", expand=True)
+        if title:
+            ttk.Label(inner, text=title.upper(), style="Section.TLabel").pack(anchor="w", pady=(0, 10))
+        content = ttk.Frame(inner, style="CardBody.TFrame")
+        content.pack(fill="both", expand=True)
+        return card, content
+
     # ------------------------------------------------------------------ layout
     def _build(self):
-        outer = ttk.Frame(self.root, padding=12)
+        p = self.palette
+        outer = ttk.Frame(self.root, padding=18)
         outer.pack(fill="both", expand=True)
 
         header = ttk.Frame(outer)
-        header.pack(fill="x", pady=(0, 8))
-        ttk.Label(header, text=f"GhostWriter {__version__}", font=("Segoe UI", 20, "bold")).pack(side="left")
-        ttk.Label(header, text="CODE-AWARE EDITOR SIMULATOR", foreground="#527f9c").pack(side="right", pady=8)
+        header.pack(fill="x", pady=(0, 14))
+        titles = ttk.Frame(header)
+        titles.pack(side="left")
+        ttk.Label(titles, text="GhostWriter", style="Title.TLabel").pack(side="left")
+        ttk.Label(titles, text=f"  {__version__}", style="Subtitle.TLabel").pack(side="left", pady=(8, 0))
+        ttk.Label(header, text="Code-aware editor simulator", style="Subtitle.TLabel").pack(side="right", pady=(8, 0))
 
         body = ttk.Frame(outer)
         body.pack(fill="both", expand=True)
 
         # -- left: file queue
-        left = ttk.Frame(body, padding=(0, 0, 10, 0), width=220)
-        left.pack(side="left", fill="y")
-        left.pack_propagate(False)
-        ttk.Label(left, text="Files to type (in order)").pack(anchor="w")
-        self.listbox = tk.Listbox(left, height=8, exportselection=False, activestyle="none")
-        self.listbox.pack(fill="both", expand=True, pady=(2, 6))
+        left_card, left = self._card(body, "Files", pad=12)
+        left_card.pack(side="left", fill="y", padx=(0, 14))
+        left_card.configure(width=240)
+        left_card.pack_propagate(False)
+        self.listbox = tk.Listbox(left, height=8, exportselection=False, activestyle="none",
+                                  background=p["surface"], foreground=p["ink"], highlightthickness=1,
+                                  highlightbackground=p["border"], highlightcolor=p["accent"],
+                                  selectbackground=p["accent"], selectforeground=p["accent_fg"],
+                                  borderwidth=0, font=("Segoe UI", 10))
+        self.listbox.pack(fill="both", expand=True, pady=(0, 10))
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
-        ttk.Button(left, text="Add files…", command=self.add_files).pack(fill="x")
-        ttk.Button(left, text="Add folder…", command=self.add_folder).pack(fill="x", pady=4)
-        row = ttk.Frame(left)
+        ttk.Button(left, text="Add files…", style="Ghost.TButton", command=self.add_files).pack(fill="x")
+        ttk.Button(left, text="Add folder…", style="Ghost.TButton", command=self.add_folder).pack(fill="x", pady=6)
+        row = ttk.Frame(left, style="CardBody.TFrame")
         row.pack(fill="x")
-        ttk.Button(row, text="▲", width=3, command=lambda: self.move(-1)).pack(side="left")
-        ttk.Button(row, text="▼", width=3, command=lambda: self.move(1)).pack(side="left", padx=4)
-        ttk.Button(row, text="Remove", command=self.remove).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="↑", width=3, style="Ghost.TButton", command=lambda: self.move(-1)).pack(side="left")
+        ttk.Button(row, text="↓", width=3, style="Ghost.TButton", command=lambda: self.move(1)).pack(side="left", padx=4)
+        ttk.Button(row, text="Remove", style="Ghost.TButton", command=self.remove).pack(side="left", fill="x", expand=True)
 
-        # -- right: code + options
+        # -- right column
         right = ttk.Frame(body)
         right.pack(side="left", fill="both", expand=True)
-        top = ttk.Frame(right)
-        top.pack(fill="x")
-        self.code_label = ttk.Label(top, text="Code")
-        self.code_label.pack(side="left")
+
+        code_card, code = self._card(right, pad=12)
+        code_card.pack(fill="both", expand=True)
+        top = ttk.Frame(code, style="CardBody.TFrame")
+        top.pack(fill="x", pady=(0, 8))
+        self.code_label = ttk.Label(top, text="Code", style="Section.TLabel")
+        self.code_label.pack(side="left", pady=(2, 0))
         self.language_box = ttk.Combobox(
             top, textvariable=self.language, state="readonly", width=14,
             values=["Auto-detect"] + [LANGUAGE_LABELS[k] for k in ("python", "javascript", "typescript", "html",
                                                                    "css", "plain")])
         self.language_box.pack(side="right")
-        ttk.Label(top, text="Language:").pack(side="right", padx=(8, 4))
+        ttk.Label(top, text="Language", style="CardMuted.TLabel").pack(side="right", padx=(8, 6))
         self.language_box.bind("<<ComboboxSelected>>", lambda e: self._store_current())
+        self.editor = tk.Text(code, wrap="none", undo=True, font=("Consolas", 10), height=9,
+                              background=p["editor_bg"], foreground=p["editor_fg"], insertbackground=p["caret"],
+                              selectbackground="#2d3444", borderwidth=0, padx=12, pady=10)
+        self.editor.pack(fill="both", expand=True)
 
-        self.editor = tk.Text(right, wrap="none", undo=True, font=("Consolas", 10), height=14,
-                              background="#17191f", foreground="#e4e6eb", insertbackground="white",
-                              padx=10, pady=10)
-        self.editor.pack(fill="both", expand=True, pady=(2, 6))
-
-        dest = ttk.LabelFrame(right, text="Where to type", padding=8)
-        dest.pack(fill="x")
+        dest_card, dest = self._card(right, "Where to type")
+        dest_card.pack(fill="x", pady=(14, 0))
         ttk.Radiobutton(dest, text="Into the editor I focus during the countdown (selected file only)",
                         variable=self.mode, value="focused", command=self._mode_changed).grid(
-            row=0, column=0, columnspan=3, sticky="w")
-        ttk.Radiobutton(dest, text="Into a project folder open in VS Code (all files, switching between them):",
+            row=0, column=0, columnspan=3, sticky="w", pady=1)
+        ttk.Radiobutton(dest, text="Into a project folder open in VS Code (all files):",
                         variable=self.mode, value="project", command=self._mode_changed).grid(
-            row=1, column=0, sticky="w")
-        self.project_entry = ttk.Entry(dest, textvariable=self.project_dir, width=38)
+            row=1, column=0, sticky="w", pady=1)
+        self.project_entry = ttk.Entry(dest, textvariable=self.project_dir, width=34)
         self.project_entry.grid(row=1, column=1, sticky="ew", padx=6)
-        self.browse_btn = ttk.Button(dest, text="Browse…", command=self.choose_project)
+        self.browse_btn = ttk.Button(dest, text="Browse…", style="Ghost.TButton", command=self.choose_project)
         self.browse_btn.grid(row=1, column=2)
-        self.open_btn = ttk.Button(dest, text="Open folder in VS Code", command=self.open_project)
-        self.open_btn.grid(row=2, column=2, pady=(4, 0))
         self.settings_chk = ttk.Checkbutton(
-            dest, text="Write recommended VS Code settings into the folder (.vscode/settings.json)",
+            dest, text="Write recommended VS Code settings (.vscode/settings.json)",
             variable=self.opt_settings)
-        self.settings_chk.grid(row=2, column=0, columnspan=2, sticky="w")
+        self.settings_chk.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.open_btn = ttk.Button(dest, text="Open folder in VS Code", style="Ghost.TButton",
+                                   command=self.open_project)
+        self.open_btn.grid(row=2, column=2, pady=(4, 0))
         dest.columnconfigure(1, weight=1)
 
-        behave = ttk.LabelFrame(right, text="Behaviour", padding=8)
-        behave.pack(fill="x", pady=(6, 0))
-        ttk.Label(behave, text="Pace:").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(behave, textvariable=self.pace, state="readonly", width=10,
-                     values=list(PACES)).grid(row=0, column=1, sticky="w", padx=(4, 14))
-        ttk.Checkbutton(behave, text="Typos fixed with Backspace", variable=self.opt_typos).grid(
-            row=0, column=2, sticky="w")
-        ttk.Checkbutton(behave, text="Select and rewrite draft code", variable=self.opt_rewrites).grid(
-            row=0, column=3, sticky="w", padx=10)
-        ttk.Checkbutton(behave, text="Navigate back (missed lines, reviewing blocks)",
-                        variable=self.opt_navigation).grid(row=1, column=2, columnspan=2, sticky="w")
-        ttk.Checkbutton(behave, text="Check the editor afterwards and correct differences",
-                        variable=self.opt_verify).grid(row=2, column=2, columnspan=2, sticky="w")
-        ttk.Checkbutton(behave, text="Replace existing content", variable=self.opt_replace).grid(
-            row=1, column=0, columnspan=2, sticky="w")
-        ttk.Checkbutton(behave, text="Move the mouse during pauses", variable=self.opt_mouse).grid(
-            row=2, column=0, columnspan=2, sticky="w")
-        ttk.Checkbutton(behave, text="Hide this window in the system tray while typing",
-                        variable=self.opt_hide).grid(row=3, column=2, columnspan=2, sticky="w")
+        tune_card, tune = self._card(right, "Typing")
+        tune_card.pack(fill="x", pady=(14, 0))
+        pace_row = ttk.Frame(tune, style="CardBody.TFrame")
+        pace_row.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ttk.Label(pace_row, text="Pace", style="CardMuted.TLabel").pack(side="left", padx=(0, 8))
+        ttk.Combobox(pace_row, textvariable=self.pace, state="readonly", width=12,
+                     values=list(PACES)).pack(side="left")
+        checks = [
+            (self.opt_typos, "Typos fixed with Backspace"),
+            (self.opt_rewrites, "Select and rewrite draft code"),
+            (self.opt_navigation, "Navigate back and review blocks"),
+            (self.opt_verify, "Verify and repair afterwards"),
+            (self.opt_replace, "Replace existing content"),
+            (self.opt_mouse, "Move the mouse during pauses"),
+            (self.opt_hide, "Hide in the tray while typing"),
+            (self.opt_close, "Close GhostWriter when finished"),
+        ]
+        for i, (var, text) in enumerate(checks):
+            r, col = divmod(i, 2)
+            ttk.Checkbutton(tune, text=text, variable=var).grid(row=r + 1, column=col, sticky="w", padx=(0, 18), pady=1)
+        tune.columnconfigure(0, weight=1)
+        tune.columnconfigure(1, weight=1)
 
-        controls = ttk.Frame(right)
-        controls.pack(fill="x", pady=(8, 0))
-        self.start_btn = ttk.Button(controls, text="▶ Start typing", command=self.start)
+        # -- action bar
+        controls = ttk.Frame(outer)
+        controls.pack(fill="x", pady=(16, 0))
+        self.start_btn = ttk.Button(controls, text="Start typing", style="Accent.TButton", command=self.start)
         self.start_btn.pack(side="left")
-        self.pause_btn = ttk.Button(controls, text="Ⅱ Pause", command=self.toggle_pause, state="disabled")
+        self.pause_btn = ttk.Button(controls, text="Pause", command=self.toggle_pause, state="disabled")
         self.pause_btn.pack(side="left", padx=6)
-        self.stop_btn = ttk.Button(controls, text="■ Stop", command=self.stop, state="disabled")
+        self.stop_btn = ttk.Button(controls, text="Stop", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left")
         self.preview_btn = ttk.Button(controls, text="Preview plan", command=self.preview)
         self.preview_btn.pack(side="left", padx=6)
         ttk.Button(controls, text="Logs…", command=self.show_logs).pack(side="left")
-        ttk.Label(controls, textvariable=self.status, font=("Segoe UI", 10, "bold")).pack(side="right")
+        self.status_label = ttk.Label(controls, textvariable=self.status, style="Status.TLabel")
+        self.status_label.pack(side="right")
 
-        self.progress = ttk.Progressbar(right, mode="determinate")
-        self.progress.pack(fill="x", pady=(6, 4))
-        self.log = tk.Text(right, height=6, wrap="word", state="disabled", font=("Consolas", 9),
-                           background="#f4f5f7")
+        self.progress = ttk.Progressbar(outer, mode="determinate", style="Horizontal.TProgressbar")
+        self.progress.pack(fill="x", pady=(12, 10))
+
+        self.log = tk.Text(outer, height=4, wrap="word", state="disabled", font=("Consolas", 9),
+                           background=p["console_bg"], foreground=p["ink"], relief="flat",
+                           highlightthickness=1, highlightbackground=p["border"], padx=10, pady=8)
         self.log.pack(fill="x")
         ttk.Label(
-            right, wraplength=760, foreground="#666",
-            text="GhostWriter sends ordinary keyboard input to the focused window. Use a scratch file or a "
-                 "disposable project folder. While typing: "
+            outer, wraplength=940, style="Muted.TLabel", justify="left",
+            text="GhostWriter sends ordinary keyboard input to the focused window — it does not conceal that "
+                 "the input is automated. Use a scratch file or a disposable project folder. While typing: "
                  f"{self.config['hotkey_pause'].upper()} pauses or resumes, "
                  f"{self.config['hotkey_stop'].upper()} stops, and moving the mouse to the top-left corner "
                  "of the screen is the emergency stop."
-        ).pack(anchor="w", pady=(6, 0))
+        ).pack(anchor="w", pady=(10, 0))
         self._mode_changed()
 
     # --------------------------------------------------------------- file list
@@ -524,7 +618,7 @@ class GhostWriterApp:
         path = self.runlog.start(f"{len(todo)} file(s) -> {destination}")
         if path:
             self._write_log(f"Logging this run to {path}")
-        self.pause_btn.configure(state="normal", text="Ⅱ Pause")
+        self.pause_btn.configure(state="normal", text="Pause")
         self.stop_btn.configure(state="normal")
         self.hotkeys.start({c["hotkey_pause"]: lambda: self.events.put(("tray", "toggle")),
                             c["hotkey_stop"]: lambda: self.events.put(("tray", "stop"))})
@@ -609,31 +703,40 @@ class GhostWriterApp:
                     self._show_window()
                     messagebox.showerror("GhostWriter", event[1])
                 elif kind == "done":
-                    self.status.set(event[1])
-                    self._write_log(f"Run ended: {event[1]}")
+                    final = event[1]
+                    self.status.set(final)
+                    self._write_log(f"Run ended: {final}")
                     self.runlog.close()
-                    self.tray.notify(event[1])
-                    self._show_window()
                     self.hotkeys.stop()
                     self.runner = None
+                    # Quiet auto-close only on a clean finish; failures and stops
+                    # always bring the window back so they are never hidden.
+                    if final == "Finished" and self.opt_close.get():
+                        self._closing = True
+                        self.tray.stop()
+                        self.root.after(150, self.root.destroy)
+                        return
+                    self.tray.notify(final)
+                    self._show_window()
                     self.start_btn.configure(state="normal")
                     self.preview_btn.configure(state="normal")
-                    self.pause_btn.configure(state="disabled", text="Ⅱ Pause")
+                    self.pause_btn.configure(state="disabled", text="Pause")
                     self.stop_btn.configure(state="disabled")
         except queue.Empty:
             pass
-        self.root.after(80, self._drain)
+        if not self._closing:
+            self.root.after(80, self._drain)
 
     def toggle_pause(self):
         if not self.runner:
             return
         if self.runner.paused:
             self.runner.resume()
-            self.pause_btn.configure(text="Ⅱ Pause")
+            self.pause_btn.configure(text="Pause")
             self.status.set("Typing")
         else:
             self.runner.pause()
-            self.pause_btn.configure(text="▶ Resume")
+            self.pause_btn.configure(text="Resume")
             self.status.set("Paused")
         self.tray.update(status=self.status.get(), paused=self.runner.paused)
 
@@ -643,6 +746,7 @@ class GhostWriterApp:
             self.status.set("Stopping…")
 
     def close(self):
+        self._closing = True
         if self.runner:
             self.runner.stop()
         self.runlog.close()
