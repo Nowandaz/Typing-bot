@@ -61,7 +61,11 @@ without sending anything.
 * The GhostWriter window hides in the system tray (notification area) so it
   is out of the way. The tray icon shows the current status; right-click it
   for Pause / Stop / Show window. It comes back by itself when typing ends.
-  Untick **Hide this window…** to keep it visible.
+  Untick **Hide in the tray…** to keep it visible.
+* **Close when finished** (optional): when a run completes cleanly, GhostWriter
+  closes itself without coming back to the screen. The run is still recorded
+  in `logs/`. A run that is **stopped or fails** always restores the window so
+  the outcome is never hidden.
 * **F9** pauses or resumes and **F10** stops, from anywhere, without taking
   focus away from VS Code (change the keys in `config.json`).
 * Typing waits automatically whenever a window other than the one you
@@ -180,6 +184,7 @@ changes the text, the verification step catches and corrects it.
 | `apply_recommended_settings` | Initial state of the settings check box |
 | `hide_window_while_typing` | Hide in the system tray during a run |
 | `mouse_movement` | Initial state of the mouse check box |
+| `close_when_finished` | Close the window after a clean finish (run still logged) |
 | `hotkey_pause`, `hotkey_stop` | Global keys (`f1`–`f12`, `pause`, `scrolllock`) |
 | `input_backend` | `auto` (SendInput on Windows), `sendinput`, `pyautogui` |
 | `seed` | A number makes the performance repeatable; `null` is different every time |

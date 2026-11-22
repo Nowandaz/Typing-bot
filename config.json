@@ -21,6 +21,7 @@
 
   "hide_window_while_typing": true,
   "mouse_movement": true,
+  "close_when_finished": false,
   "hotkey_pause": "f9",
   "hotkey_stop": "f10",
 
